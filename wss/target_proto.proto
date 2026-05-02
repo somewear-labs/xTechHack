@@ -2,8 +2,42 @@ syntax = "proto3";
 
 option java_package = "com.somewear.gen";
 
-import "timestamp_proto.proto";
-import "tracking_session_proto.proto";
+message Timestamp {
+    // Represents seconds of UTC time since Unix epoch
+    // 1970-01-01T00:00:00Z. Must be from 0001-01-01T00:00:00Z to
+    // 9999-12-31T23:59:59Z inclusive.
+    int64 seconds = 1;
+
+    // Non-negative fractions of a second at nanosecond resolution. Negative
+    // second values with fractions must still have non-negative nanos values
+    // that count forward in time. Must be from 0 to 999,999,999
+    // inclusive.
+    int32 nanos = 2;
+}
+
+message TrackingLocationDto {
+    sint32 longitude = 1;
+    sint32 latitude = 2;
+    fixed32 timestamp = 3;
+    sint32 altitude = 4;
+    uint32 speedOverGround = 5;
+    uint32 courseOverGround = 6;
+}
+
+
+message TrackingLocationDelta {
+    sint32 longitudeDelta = 1;
+    sint32 latitudeDelta = 2;
+    sint32 timestampDelta = 3;
+    sint32 altitudeDelta = 4;
+    sint32 speedOverGroundDelta = 5;
+    sint32 courseOverGroundDelta = 6;
+}
+
+message TrackingLocationDeltaList {
+    TrackingLocationDto baseLocation = 1;
+    repeated TrackingLocationDelta deltas = 2;
+}
 
 enum TargetState {
     TARGET_STATE_UNKNOWN = 0;
