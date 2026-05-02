@@ -300,9 +300,10 @@ async def handle_beam_event(ws: WebSocketServerProtocol, payload: Any) -> str:
 
             elif event_type == "Message":
                 await broadcast("beam_message", {
-                    "identity": identity,
-                    "content":  event.get("content", ""),
-                    "timestamp": event.get("timestamp", ""),
+                    "identity":   identity,
+                    "account_id": workspace_id,
+                    "content":    event.get("content", ""),
+                    "timestamp":  event.get("timestamp", ""),
                 })
 
             elif event_type == "Data":

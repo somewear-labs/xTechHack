@@ -40,6 +40,8 @@ const LAYER_LABEL  = 'targets-label';
 // ---------------------------------------------------------------------------
 
 let targets = {};           // id → target
+let messages = [];          // [{sender, content, timestamp}] newest-first, capped at 100
+let unreadMessages = 0;
 let selectedId = null;
 let currentStyle = 'dark-topo';
 let popup = null;
@@ -69,6 +71,7 @@ map.on('load', () => {
   addTerrainAndSky();
   initTargetLayers();
   connectWebSocket();
+  renderMessages();
 });
 
 // ---------------------------------------------------------------------------
@@ -290,6 +293,20 @@ function handleMessage(msg) {
     }
     rebuildSource();
     renderList();
+    return;
+  }
+
+  if (msg.event === 'beam_message') {
+    const identity = msg.data.identity || {};
+    const sender = identity.name || identity.id || msg.data.account_id || 'Unknown';
+    messages.unshift({
+      sender,
+      content:   msg.data.content || '',
+      timestamp: msg.data.timestamp || '',
+    });
+    if (messages.length > 100) messages.pop();
+    unreadMessages++;
+    renderMessages();
   }
 }
 
@@ -336,6 +353,56 @@ function renderList() {
   container.querySelectorAll('.target-card').forEach(card => {
     card.addEventListener('click', () => selectTarget(card.dataset.id, true));
   });
+}
+
+// ---------------------------------------------------------------------------
+// Messages feed
+// ---------------------------------------------------------------------------
+
+function renderMessages() {
+  const container = document.getElementById('message-list');
+  const badge = document.getElementById('messages-unread');
+
+  if (unreadMessages > 0) {
+    badge.textContent = unreadMessages > 99 ? '99+' : unreadMessages;
+    badge.classList.remove('hidden');
+  } else {
+    badge.classList.add('hidden');
+  }
+
+  // Clear badge when the panel is scrolled into view (user sees messages)
+  const section = document.getElementById('messages-section');
+  if (section.getBoundingClientRect().height > 0) {
+    unreadMessages = 0;
+    badge.classList.add('hidden');
+  }
+
+  if (messages.length === 0) {
+    container.innerHTML = '<div class="messages-empty">No messages</div>';
+    return;
+  }
+
+  container.innerHTML = messages.map(m => {
+    const time = m.timestamp
+      ? new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : '';
+    return `
+      <div class="message-row">
+        <div class="message-meta">
+          <span class="message-sender">${escapeHtml(m.sender)}</span>
+          <span class="message-time">${time}</span>
+        </div>
+        <div class="message-content">${escapeHtml(m.content)}</div>
+      </div>`;
+  }).join('');
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 function formatAge(unixSeconds) {
