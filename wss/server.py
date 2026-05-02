@@ -42,6 +42,7 @@ import json
 import time
 import uuid
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 import websockets
@@ -68,6 +69,9 @@ targets: dict[str, dict] = {}
 # All connected websocket clients
 connected: set[WebSocketServerProtocol] = set()
 
+# Beam identity_id → target id (for create-or-update on ingest)
+identity_targets: dict[str, str] = {}
+
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -76,6 +80,16 @@ connected: set[WebSocketServerProtocol] = set()
 def now_timestamp() -> dict:
     t = time.time()
     return {"seconds": int(t), "nanos": int((t % 1) * 1_000_000_000)}
+
+
+def parse_iso_timestamp(ts_str: str) -> int:
+    if not ts_str:
+        return int(time.time())
+    try:
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        return int(dt.timestamp())
+    except ValueError:
+        return int(time.time())
 
 
 def validate_tracking_location(loc: Any) -> str | None:
@@ -209,12 +223,102 @@ async def handle_delete(ws: WebSocketServerProtocol, payload: Any) -> str:
     return ok("delete", {"id": target_id})
 
 
+async def handle_beam_event(ws: WebSocketServerProtocol, payload: Any) -> str:
+    """
+    Ingest a Beam inbound payload and create/update targets from Location events.
+    Also broadcasts raw Message and Data events to all clients.
+
+    Expected payload shape (Beam inbound format):
+      {
+        "requestId": "...",
+        "payloads": [{
+          "identity": {"id": "...", "name": "...", "type": "...", "email": "..."},
+          "account":  {"id": "..."},
+          "events":   [{"type": "Location"|"Message"|"Data", ...}]
+        }]
+      }
+    """
+    if not isinstance(payload, dict):
+        return err("beam_event", "payload must be the Beam inbound JSON object")
+
+    upserted: list[dict] = []
+
+    for entry in payload.get("payloads", []):
+        identity     = entry.get("identity", {})
+        identity_id  = identity.get("id", "")
+        identity_name = identity.get("name") or identity_id
+        account      = entry.get("account", {})
+        workspace_id = account.get("id", "")
+
+        for event in entry.get("events", []):
+            event_type = event.get("type")
+
+            if event_type == "Location":
+                try:
+                    lat = float(event["latitude"])
+                    lng = float(event["longitude"])
+                except (KeyError, ValueError) as exc:
+                    log.warning("beam_event: bad location data: %s", exc)
+                    continue
+
+                tracking_location = {
+                    "longitude":         int(lng * 1e7),
+                    "latitude":          int(lat * 1e7),
+                    "timestamp":         parse_iso_timestamp(event.get("timestamp", "")),
+                    "altitude":          0,
+                    "speed_over_ground": 0,
+                    "course_over_ground": 0,
+                }
+
+                existing_id = identity_targets.get(identity_id)
+                if existing_id and existing_id in targets:
+                    target = targets[existing_id]
+                    target["tracking_location"] = tracking_location
+                    target["state"]             = "TARGET_STATE_ACTIVE"
+                    target["updated_date"]      = now_timestamp()
+                    log.info("beam_event: updated target %s for identity %s", existing_id, identity_id)
+                    await broadcast("target_updated", target, exclude=ws)
+                else:
+                    target = {
+                        "id":                str(uuid.uuid4()),
+                        "updated_date":      now_timestamp(),
+                        "tracking_location": tracking_location,
+                        "state":             "TARGET_STATE_ACTIVE",
+                        "workspace_id":      workspace_id,
+                        "label":             identity_name,
+                        "beam_identity_id":  identity_id,
+                    }
+                    targets[target["id"]] = target
+                    identity_targets[identity_id] = target["id"]
+                    log.info("beam_event: created target %s for identity %s", target["id"], identity_id)
+                    await broadcast("target_created", target, exclude=ws)
+
+                upserted.append(target)
+
+            elif event_type == "Message":
+                await broadcast("beam_message", {
+                    "identity": identity,
+                    "content":  event.get("content", ""),
+                    "timestamp": event.get("timestamp", ""),
+                })
+
+            elif event_type == "Data":
+                await broadcast("beam_data", {
+                    "identity": identity,
+                    "payload":  event.get("payload", ""),
+                    "timestamp": event.get("timestamp", ""),
+                })
+
+    return ok("beam_event", upserted)
+
+
 HANDLERS = {
-    "create": handle_create,
-    "get": handle_get,
-    "list": handle_list,
-    "update": handle_update,
-    "delete": handle_delete,
+    "create":     handle_create,
+    "get":        handle_get,
+    "list":       handle_list,
+    "update":     handle_update,
+    "delete":     handle_delete,
+    "beam_event": handle_beam_event,
 }
 
 
