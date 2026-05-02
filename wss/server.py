@@ -1,0 +1,267 @@
+"""
+WebSocket API server for Target CRUD operations.
+
+JSON shape mirrors target_proto.proto / tracking_session_proto.proto:
+
+Target:
+  id            : str  (uuid, assigned on create)
+  updated_date  : { seconds: int, nanos: int }
+  tracking_location: {
+      longitude        : int   (sint32, scaled 1e-7 degrees)
+      latitude         : int   (sint32, scaled 1e-7 degrees)
+      timestamp        : int   (fixed32, unix seconds)
+      altitude         : int   (sint32, millimeters)
+      speed_over_ground: int   (uint32, mm/s)
+      course_over_ground: int  (uint32, millidegrees)
+  }
+  state       : str  (TARGET_STATE_UNKNOWN | TARGET_STATE_ACTIVE | TARGET_STATE_INACTIVE |
+                       TARGET_STATE_ACQUIRED | TARGET_STATE_LOST | TARGET_STATE_NEUTRALIZED)
+  workspace_id: str
+
+--- WebSocket message protocol ---
+
+Client → server:
+  { "action": "create", "payload": <target without id> }
+  { "action": "get",    "payload": { "id": "..." } }
+  { "action": "list",   "payload": { "workspace_id": "..." } }   # workspace_id optional
+  { "action": "update", "payload": { "id": "...", ...fields } }
+  { "action": "delete", "payload": { "id": "..." } }
+
+Server → requesting client:
+  { "action": "...", "status": "success", "data": <target or list or {"id":"..."}> }
+  { "action": "...", "status": "error",   "error": "<message>" }
+
+Server → all connected clients (broadcasts):
+  { "event": "target_created", "data": <target> }
+  { "event": "target_updated", "data": <target> }
+  { "event": "target_deleted", "data": { "id": "..." } }
+"""
+
+import asyncio
+import json
+import time
+import uuid
+import logging
+from typing import Any
+
+import websockets
+from websockets import ServerConnection as WebSocketServerProtocol
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger(__name__)
+
+HOST = "localhost"
+PORT = 8765
+
+TARGET_STATES = {
+    "TARGET_STATE_UNKNOWN",
+    "TARGET_STATE_ACTIVE",
+    "TARGET_STATE_INACTIVE",
+    "TARGET_STATE_ACQUIRED",
+    "TARGET_STATE_LOST",
+    "TARGET_STATE_NEUTRALIZED",
+}
+
+# In-memory store: { id -> target_dict }
+targets: dict[str, dict] = {}
+
+# All connected websocket clients
+connected: set[WebSocketServerProtocol] = set()
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+def now_timestamp() -> dict:
+    t = time.time()
+    return {"seconds": int(t), "nanos": int((t % 1) * 1_000_000_000)}
+
+
+def validate_tracking_location(loc: Any) -> str | None:
+    if loc is None:
+        return None
+    if not isinstance(loc, dict):
+        return "tracking_location must be an object"
+    for field in ("longitude", "latitude", "timestamp", "altitude", "speed_over_ground", "course_over_ground"):
+        if field in loc and not isinstance(loc[field], int):
+            return f"tracking_location.{field} must be an integer"
+    return None
+
+
+def validate_state(state: Any) -> str | None:
+    if state is not None and state not in TARGET_STATES:
+        return f"state must be one of {sorted(TARGET_STATES)}"
+    return None
+
+
+def build_target(payload: dict) -> tuple[dict | None, str | None]:
+    err = validate_tracking_location(payload.get("tracking_location"))
+    if err:
+        return None, err
+    err = validate_state(payload.get("state"))
+    if err:
+        return None, err
+
+    return {
+        "id": str(uuid.uuid4()),
+        "updated_date": now_timestamp(),
+        "tracking_location": payload.get("tracking_location") or {},
+        "state": payload.get("state", "TARGET_STATE_UNKNOWN"),
+        "workspace_id": payload.get("workspace_id", ""),
+    }, None
+
+
+def ok(action: str, data: Any) -> str:
+    return json.dumps({"action": action, "status": "success", "data": data})
+
+
+def err(action: str, message: str) -> str:
+    return json.dumps({"action": action, "status": "error", "error": message})
+
+
+async def broadcast(event: str, data: Any, exclude: WebSocketServerProtocol | None = None) -> None:
+    msg = json.dumps({"event": event, "data": data})
+    recipients = connected - ({exclude} if exclude else set())
+    if recipients:
+        await asyncio.gather(*[ws.send(msg) for ws in recipients], return_exceptions=True)
+
+
+# ---------------------------------------------------------------------------
+# action handlers
+# ---------------------------------------------------------------------------
+
+async def handle_create(ws: WebSocketServerProtocol, payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return err("create", "payload must be an object")
+
+    target, error = build_target(payload)
+    if error:
+        return err("create", error)
+
+    targets[target["id"]] = target
+    log.info("created target %s", target["id"])
+    await broadcast("target_created", target, exclude=ws)
+    return ok("create", target)
+
+
+async def handle_get(_ws: WebSocketServerProtocol, payload: Any) -> str:
+    if not isinstance(payload, dict) or "id" not in payload:
+        return err("get", "payload must contain 'id'")
+
+    target = targets.get(payload["id"])
+    if target is None:
+        return err("get", f"target {payload['id']} not found")
+    return ok("get", target)
+
+
+async def handle_list(_ws: WebSocketServerProtocol, payload: Any) -> str:
+    workspace_id = None
+    if isinstance(payload, dict):
+        workspace_id = payload.get("workspace_id")
+
+    result = list(targets.values())
+    if workspace_id is not None:
+        result = [t for t in result if t["workspace_id"] == workspace_id]
+    return ok("list", result)
+
+
+async def handle_update(ws: WebSocketServerProtocol, payload: Any) -> str:
+    if not isinstance(payload, dict) or "id" not in payload:
+        return err("update", "payload must contain 'id'")
+
+    target = targets.get(payload["id"])
+    if target is None:
+        return err("update", f"target {payload['id']} not found")
+
+    if "tracking_location" in payload:
+        error = validate_tracking_location(payload["tracking_location"])
+        if error:
+            return err("update", error)
+        target["tracking_location"] = payload["tracking_location"]
+
+    if "state" in payload:
+        error = validate_state(payload["state"])
+        if error:
+            return err("update", error)
+        target["state"] = payload["state"]
+
+    if "workspace_id" in payload:
+        target["workspace_id"] = payload["workspace_id"]
+
+    target["updated_date"] = now_timestamp()
+    log.info("updated target %s", target["id"])
+    await broadcast("target_updated", target, exclude=ws)
+    return ok("update", target)
+
+
+async def handle_delete(ws: WebSocketServerProtocol, payload: Any) -> str:
+    if not isinstance(payload, dict) or "id" not in payload:
+        return err("delete", "payload must contain 'id'")
+
+    target_id = payload["id"]
+    if target_id not in targets:
+        return err("delete", f"target {target_id} not found")
+
+    del targets[target_id]
+    log.info("deleted target %s", target_id)
+    await broadcast("target_deleted", {"id": target_id}, exclude=ws)
+    return ok("delete", {"id": target_id})
+
+
+HANDLERS = {
+    "create": handle_create,
+    "get": handle_get,
+    "list": handle_list,
+    "update": handle_update,
+    "delete": handle_delete,
+}
+
+
+# ---------------------------------------------------------------------------
+# connection handler
+# ---------------------------------------------------------------------------
+
+async def handler(ws: WebSocketServerProtocol) -> None:
+    connected.add(ws)
+    log.info("client connected  (%d total)", len(connected))
+    try:
+        async for raw in ws:
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                await ws.send(err("unknown", "invalid JSON"))
+                continue
+
+            action = msg.get("action")
+            payload = msg.get("payload")
+
+            fn = HANDLERS.get(action)
+            if fn is None:
+                await ws.send(err(action or "unknown", f"unknown action '{action}'"))
+                continue
+
+            response = await fn(ws, payload)
+            await ws.send(response)
+
+    except websockets.exceptions.ConnectionClosedOK:
+        pass
+    except websockets.exceptions.ConnectionClosedError as e:
+        log.warning("client disconnected with error: %s", e)
+    finally:
+        connected.discard(ws)
+        log.info("client disconnected (%d total)", len(connected))
+
+
+# ---------------------------------------------------------------------------
+# entry point
+# ---------------------------------------------------------------------------
+
+async def main() -> None:
+    log.info("starting target WebSocket API on ws://%s:%d", HOST, PORT)
+    async with websockets.serve(handler, HOST, PORT):
+        await asyncio.Future()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
