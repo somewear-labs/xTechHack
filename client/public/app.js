@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 const MAPBOX_TOKEN = 'pk.eyJ1IjoibWF0dGxyb2JlcnRzIiwiYSI6ImNra2o3MWE3aDBic3cydnV6eTdqbDRtbmcifQ.aUiGrdGs4_Fy_x4cJinbDQ';
-const WSS_URL = 'ws://localhost:8765';
+const WSS_URL = 'ws://localhost:8000';
 
 const MAP_STYLES = {
   'dark-topo':  'mapbox://styles/mapbox/dark-v11',
