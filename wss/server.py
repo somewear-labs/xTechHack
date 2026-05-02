@@ -49,6 +49,13 @@ import websockets
 from websockets import ServerConnection as WebSocketServerProtocol
 from aiohttp import web
 
+try:
+    from proto_utils import base64_to_target_dict as _proto_decode
+    _PROTO_AVAILABLE = True
+except Exception as _proto_import_err:
+    _PROTO_AVAILABLE = False
+    _proto_decode = None
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -134,6 +141,17 @@ def ok(action: str, data: Any) -> str:
 
 def err(action: str, message: str) -> str:
     return json.dumps({"action": action, "status": "error", "error": message})
+
+
+def _try_decode_proto_target(content: str) -> dict | None:
+    """Try to interpret a base64 string as a serialized TargetResponse proto. Returns None on failure."""
+    if not _PROTO_AVAILABLE or not content:
+        return None
+    try:
+        return _proto_decode(content)
+    except Exception as exc:
+        log.debug("Message content is not a proto target: %s", exc)
+        return None
 
 
 async def broadcast(event: str, data: Any, exclude: WebSocketServerProtocol | None = None) -> None:
@@ -299,12 +317,26 @@ async def handle_beam_event(ws: WebSocketServerProtocol, payload: Any) -> str:
                 upserted.append(target)
 
             elif event_type == "Message":
-                await broadcast("beam_message", {
-                    "identity":   identity,
-                    "account_id": workspace_id,
-                    "content":    event.get("content", ""),
-                    "timestamp":  event.get("timestamp", ""),
-                })
+                content = event.get("content", "")
+                target = _try_decode_proto_target(content)
+                if target is not None:
+                    target_id = target["id"]
+                    is_new = target_id not in targets
+                    target["updated_date"] = now_timestamp()
+                    target["label"] = identity_name
+                    target["beam_identity_id"] = identity_id
+                    targets[target_id] = target
+                    event_name = "target_created" if is_new else "target_updated"
+                    log.info("beam_event: decoded proto target %s from Message (%s)", target_id, event_name)
+                    await broadcast(event_name, target, exclude=ws)
+                    upserted.append(target)
+                else:
+                    await broadcast("beam_message", {
+                        "identity":   identity,
+                        "account_id": workspace_id,
+                        "content":    content,
+                        "timestamp":  event.get("timestamp", ""),
+                    })
 
             elif event_type == "Data":
                 await broadcast("beam_data", {
