@@ -50,7 +50,7 @@ from websockets import ServerConnection as WebSocketServerProtocol
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-HOST = "localhost"
+HOST = "0.0.0.0"
 PORT = 8765
 
 TARGET_STATES = {
