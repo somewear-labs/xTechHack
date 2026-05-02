@@ -47,12 +47,14 @@ from typing import Any
 
 import websockets
 from websockets import ServerConnection as WebSocketServerProtocol
+from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
 HOST = "0.0.0.0"
-PORT = 8765
+PORT = 8000
+HTTP_PORT = 8080
 
 TARGET_STATES = {
     "TARGET_STATE_UNKNOWN",
@@ -245,10 +247,11 @@ async def handle_beam_event(ws: WebSocketServerProtocol, payload: Any) -> str:
 
     for entry in payload.get("payloads", []):
         identity     = entry.get("identity", {})
-        identity_id  = identity.get("id", "")
-        identity_name = identity.get("name") or identity_id
         account      = entry.get("account", {})
         workspace_id = account.get("id", "")
+        # Fall back to account.id when identity is absent (Beam omits it for device-only payloads)
+        identity_id   = identity.get("id", "") or workspace_id
+        identity_name = identity.get("name", "") or identity_id
 
         for event in entry.get("events", []):
             event_type = event.get("type")
@@ -331,6 +334,7 @@ async def handler(ws: WebSocketServerProtocol) -> None:
     log.info("client connected  (%d total)", len(connected))
     try:
         async for raw in ws:
+            log.info("recv << %s", raw)
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
@@ -358,10 +362,70 @@ async def handler(ws: WebSocketServerProtocol) -> None:
 
 
 # ---------------------------------------------------------------------------
+# HTTP webhook
+# ---------------------------------------------------------------------------
+
+async def http_beam(request: web.Request) -> web.Response:
+    peer = request.remote
+    log.info("webhook: POST /beam from %s", peer)
+
+    body = await request.read()
+    log.info("webhook: raw body (%d bytes): %s", len(body), body.decode(errors="replace"))
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        log.warning("webhook: invalid JSON from %s — %s | body: %s", peer, exc, body.decode(errors="replace"))
+        return web.Response(status=400, text=f"invalid JSON: {exc}")
+
+    request_id = payload.get("requestId", "<none>")
+    n_payloads = len(payload.get("payloads", []))
+    log.info("webhook: requestId=%s payloads=%d", request_id, n_payloads)
+
+    for i, entry in enumerate(payload.get("payloads", [])):
+        identity = entry.get("identity", {})
+        events = entry.get("events", [])
+        log.info(
+            "webhook: payload[%d] identity=%s(%s) events=%d",
+            i, identity.get("name", ""), identity.get("id", ""), len(events),
+        )
+        for j, event in enumerate(events):
+            log.info("webhook: payload[%d].event[%d] type=%s data=%s", i, j, event.get("type"), json.dumps(event))
+
+    try:
+        # Pass None as ws so broadcast excludes nobody (all clients receive events)
+        result_json = await handle_beam_event(None, payload)
+    except Exception as exc:
+        log.exception("webhook: unhandled error processing requestId=%s — %s", request_id, exc)
+        return web.Response(status=500, text="internal server error")
+
+    result = json.loads(result_json)
+    if result.get("status") == "error":
+        log.error("webhook: beam_event error for requestId=%s — %s", request_id, result.get("error"))
+    else:
+        log.info("webhook: requestId=%s processed OK upserted=%d", request_id, len(result.get("data", [])))
+    log.info("webhook: response >> %s", result_json)
+
+    return web.Response(content_type="application/json", text=result_json)
+
+
+async def start_http(app: web.Application) -> web.AppRunner:
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, HOST, HTTP_PORT).start()
+    log.info("HTTP webhook listening on http://%s:%d/beam", HOST, HTTP_PORT)
+    return runner
+
+
+# ---------------------------------------------------------------------------
 # entry point
 # ---------------------------------------------------------------------------
 
 async def main() -> None:
+    http_app = web.Application()
+    http_app.router.add_post("/beam", http_beam)
+    await start_http(http_app)
+
     log.info("starting target WebSocket API on ws://%s:%d", HOST, PORT)
     async with websockets.serve(handler, HOST, PORT):
         await asyncio.Future()
