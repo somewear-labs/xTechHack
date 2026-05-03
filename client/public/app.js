@@ -827,6 +827,46 @@ function toggleOutSim() {
 document.getElementById('out-sim-btn').addEventListener('click', toggleOutSim);
 
 // ---------------------------------------------------------------------------
+// RTMS PiP viewer
+// ---------------------------------------------------------------------------
+
+(function initPip() {
+  const RTSP_WS_URL = `ws://${location.hostname}:9999`;
+
+  const container = document.getElementById('pip-container');
+  const canvas    = document.getElementById('pip-canvas');
+  const statusEl  = document.getElementById('pip-status');
+  const toggleBtn = document.getElementById('pip-toggle');
+
+  let collapsed = false;
+
+  function setPipStatus(state) {
+    statusEl.className = `pip-status-${state}`;
+    statusEl.textContent = { live: 'LIVE', connecting: 'CONNECTING', error: 'ERROR' }[state];
+  }
+
+  setPipStatus('connecting');
+
+  // JSMpeg handles reconnection internally (reconnectInterval defaults to 5s).
+  // Don't manage the WebSocket manually — just use the provided callbacks.
+  new JSMpeg.Player(RTSP_WS_URL, {
+    canvas,
+    autoplay: true,
+    audio: false,
+    disableGl: true,
+    reconnectInterval: 5,
+    onSourceEstablished: () => setPipStatus('live'),
+    onSourceCompleted:   () => setPipStatus('connecting'),
+  });
+
+  toggleBtn.addEventListener('click', () => {
+    collapsed = !collapsed;
+    container.classList.toggle('collapsed', collapsed);
+    toggleBtn.textContent = collapsed ? '▲' : '▼';
+  });
+})();
+
+// ---------------------------------------------------------------------------
 // Basemap selector
 // ---------------------------------------------------------------------------
 

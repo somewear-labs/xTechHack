@@ -45,9 +45,19 @@
 
       <button id="sim-btn">SIM</button>
       <button id="out-sim-btn">OUT SIM</button>
+
+      <div id="pip-container">
+        <div id="pip-header">
+          <span id="pip-title">RTMS FEED</span>
+          <span id="pip-status" class="pip-status-connecting">CONNECTING</span>
+          <button id="pip-toggle">▼</button>
+        </div>
+        <canvas id="pip-canvas"></canvas>
+      </div>
     </div>
   </div>
 
+  <script src="jsmpeg.min.js"></script>
   <script src="target-repo.js"></script>
   <script src="app.js"></script>
 </body>

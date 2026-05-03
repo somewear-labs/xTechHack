@@ -662,3 +662,99 @@ html, body {
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
+
+/* ── RTMS PiP overlay ─────────────────────────── */
+
+#pip-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 10;
+  width: 33.333%;
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-separator);
+  border-right: 1px solid var(--surface-separator);
+  border-bottom: 1px solid var(--surface-separator);
+  border-radius: 0 0 6px 0;
+  overflow: hidden;
+  box-shadow: 4px 4px 20px rgba(0,0,0,0.6);
+  transition: height 0.2s ease;
+}
+
+#pip-container.collapsed {
+  height: 32px;
+  border-radius: 0 0 6px 0;
+}
+
+#pip-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  height: 32px;
+  background: var(--surface-card);
+  border-bottom: 1px solid var(--surface-separator);
+  cursor: default;
+  flex-shrink: 0;
+}
+
+#pip-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: var(--secondary-on-surface);
+  flex: 1;
+}
+
+.pip-status-connecting {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  color: var(--secondary-accent);
+  background: rgba(248,193,0,0.15);
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.pip-status-live {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  color: var(--tertiary-accent);
+  background: rgba(30,185,130,0.15);
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.pip-status-error {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  color: var(--error);
+  background: rgba(228,89,29,0.15);
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+#pip-toggle {
+  background: transparent;
+  border: none;
+  color: var(--tertiary-on-surface);
+  font-size: 10px;
+  cursor: pointer;
+  padding: 2px 4px;
+  line-height: 1;
+  font-family: var(--font);
+  transition: color 0.15s;
+}
+
+#pip-toggle:hover {
+  color: var(--primary-on-surface);
+}
+
+#pip-canvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16/9;
+  background: #000;
+}
