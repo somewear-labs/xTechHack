@@ -11,35 +11,39 @@ const MAP_STYLES = {
   'satellite':  'mapbox://styles/mapbox/satellite-streets-v12',
 };
 
-// Matches Somewear color palette from colors.xml / Colors.kt
-const STATE_COLORS = {
-  TARGET_STATE_ACTIVE:      '#226FEE',  // primaryAccent
-  TARGET_STATE_ACQUIRED:    '#1EB982',  // tertiaryAccent
-  TARGET_STATE_INACTIVE:    '#9B9B9B',  // tertiaryOnSurface
-  TARGET_STATE_LOST:        '#E4591D',  // error
-  TARGET_STATE_NEUTRALIZED: '#E4591D',  // error
-  TARGET_STATE_UNKNOWN:     '#5F666C',  // secondaryOnSurface
+// Single source of truth for all state presentation
+const STATE_META = {
+  TARGET_STATE_ACTIVE:      { icon: '▲', color: '#226FEE', bg: 'rgba(34,111,238,0.18)',   label: 'ACTIVE',      short: 'ACTV' },
+  TARGET_STATE_ACQUIRED:    { icon: '◎', color: '#1EB982', bg: 'rgba(30,185,130,0.18)',   label: 'ACQUIRED',    short: 'ACQD' },
+  TARGET_STATE_INACTIVE:    { icon: '■', color: '#9B9B9B', bg: 'rgba(155,155,155,0.15)', label: 'INACTIVE',    short: 'INAC' },
+  TARGET_STATE_LOST:        { icon: '◈', color: '#F8C100', bg: 'rgba(248,193,0,0.18)',    label: 'LOST',        short: 'LOST' },
+  TARGET_STATE_NEUTRALIZED: { icon: '✕', color: '#E4591D', bg: 'rgba(228,89,29,0.18)',   label: 'NEUTRALIZED', short: 'NEUT' },
+  TARGET_STATE_UNKNOWN:     { icon: '○', color: '#5F666C', bg: 'rgba(95,102,108,0.15)',  label: 'UNKNOWN',     short: 'UNKN' },
 };
 
-const STATE_LABELS = {
-  TARGET_STATE_ACTIVE:      'ACTIVE',
-  TARGET_STATE_ACQUIRED:    'ACQUIRED',
-  TARGET_STATE_INACTIVE:    'INACTIVE',
-  TARGET_STATE_LOST:        'LOST',
-  TARGET_STATE_NEUTRALIZED: 'NEUTRALIZED',
-  TARGET_STATE_UNKNOWN:     'UNKNOWN',
-};
+// Derived maps kept for Mapbox expressions and legacy use
+const STATE_COLORS = Object.fromEntries(Object.entries(STATE_META).map(([k, v]) => [k, v.color]));
+const STATE_LABELS = Object.fromEntries(Object.entries(STATE_META).map(([k, v]) => [k, v.label]));
 
-const SOURCE_ID = 'targets-source';
+const SOURCE_ID    = 'targets-source';
 const LAYER_CIRCLE = 'targets-circle';
 const LAYER_PULSE  = 'targets-pulse';
 const LAYER_LABEL  = 'targets-label';
+
+const WORKSPACE_ID = 'xtech-hackathon';
+
+// Shack15, 99 Green St, San Francisco
+const SIM_LAT = 37.7993;
+const SIM_LNG = -122.3983;
+
+const NATO = ['ALPHA', 'BRAVO', 'CHARLIE', 'DELTA', 'ECHO', 'FOXTROT', 'GOLF', 'HOTEL', 'INDIA', 'JULIET'];
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
-const repo = new TargetRepo();
+const repo      = new TargetRepo();
+const assetRepo = new TargetRepo();
 let messages = [];          // [{sender, content, timestamp}] newest-first, capped at 100
 let unreadMessages = 0;
 let selectedId = null;
@@ -51,6 +55,8 @@ let reconnectTimeout;
 let simInterval = null;
 let simTargetId = null;
 let outSimRunning = false;
+let activeDropdownId = null;
+let activeTab = 'targets';
 
 // ---------------------------------------------------------------------------
 // Map init
@@ -70,13 +76,12 @@ function loadCameraState() {
 
 function saveCameraState() {
   try {
-    const state = {
-      center: map.getCenter().toArray(),
-      zoom: map.getZoom(),
-      pitch: map.getPitch(),
+    localStorage.setItem(CAMERA_STORAGE_KEY, JSON.stringify({
+      center:  map.getCenter().toArray(),
+      zoom:    map.getZoom(),
+      pitch:   map.getPitch(),
       bearing: map.getBearing(),
-    };
-    localStorage.setItem(CAMERA_STORAGE_KEY, JSON.stringify(state));
+    }));
   } catch (_) {}
 }
 
@@ -85,15 +90,14 @@ const savedCamera = loadCameraState();
 map = new mapboxgl.Map({
   container: 'map',
   style: MAP_STYLES['dark-topo'],
-  center: savedCamera ? savedCamera.center : [-98.5795, 39.8283],
-  zoom: savedCamera ? savedCamera.zoom : 3,
-  pitch: savedCamera ? savedCamera.pitch : 40,
+  center:  savedCamera ? savedCamera.center  : [-98.5795, 39.8283],
+  zoom:    savedCamera ? savedCamera.zoom    : 3,
+  pitch:   savedCamera ? savedCamera.pitch   : 40,
   bearing: savedCamera ? savedCamera.bearing : 0,
   antialias: true,
 });
 
 map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), 'top-left');
-
 map.on('moveend', saveCameraState);
 
 map.on('load', () => {
@@ -136,10 +140,7 @@ function addTerrainAndSky() {
 // ---------------------------------------------------------------------------
 
 function initTargetLayers() {
-  map.addSource(SOURCE_ID, {
-    type: 'geojson',
-    data: emptyFeatureCollection(),
-  });
+  map.addSource(SOURCE_ID, { type: 'geojson', data: emptyFeatureCollection() });
 
   // Outer pulse ring for active targets
   map.addLayer({
@@ -162,17 +163,9 @@ function initTargetLayers() {
     type: 'circle',
     source: SOURCE_ID,
     paint: {
-      'circle-radius': [
-        'case',
-        ['boolean', ['feature-state', 'selected'], false], 11,
-        9,
-      ],
+      'circle-radius': ['case', ['boolean', ['feature-state', 'selected'], false], 11, 9],
       'circle-color': stateColorExpression(),
-      'circle-stroke-width': [
-        'case',
-        ['boolean', ['feature-state', 'selected'], false], 2,
-        1.5,
-      ],
+      'circle-stroke-width': ['case', ['boolean', ['feature-state', 'selected'], false], 2, 1.5],
       'circle-stroke-color': [
         'case',
         ['boolean', ['feature-state', 'selected'], false], '#FFFFFF',
@@ -200,28 +193,18 @@ function initTargetLayers() {
     },
   });
 
-  // Click handler
-  map.on('click', LAYER_CIRCLE, (e) => {
-    const id = e.features[0].properties.id;
-    selectTarget(id, true);
-  });
-
-  map.on('mouseenter', LAYER_CIRCLE, () => {
-    map.getCanvas().style.cursor = 'pointer';
-  });
-  map.on('mouseleave', LAYER_CIRCLE, () => {
-    map.getCanvas().style.cursor = '';
-  });
+  map.on('click', LAYER_CIRCLE, (e) => selectTarget(e.features[0].properties.id, true));
+  map.on('mouseenter', LAYER_CIRCLE, () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', LAYER_CIRCLE, () => { map.getCanvas().style.cursor = ''; });
 }
 
 function stateColorExpression() {
   return [
-    'match',
-    ['get', 'state'],
+    'match', ['get', 'state'],
     'TARGET_STATE_ACTIVE',      '#226FEE',
     'TARGET_STATE_ACQUIRED',    '#1EB982',
     'TARGET_STATE_INACTIVE',    '#9B9B9B',
-    'TARGET_STATE_LOST',        '#E4591D',
+    'TARGET_STATE_LOST',        '#F8C100',
     'TARGET_STATE_NEUTRALIZED', '#E4591D',
     /* default */ '#5F666C',
   ];
@@ -269,7 +252,7 @@ function rebuildSource() {
 // ---------------------------------------------------------------------------
 
 const displayPositions = new Map(); // id → { lng, lat }
-const activeAnimations = new Map(); // id → { startLng, startLat, endLng, endLat, startTime, duration }
+const activeAnimations = new Map(); // id → { startLng, startLat, endLng, endLat, startTime }
 const ANIM_MS = 700;
 
 function lerp(a, b, t) { return a + (b - a) * t; }
@@ -317,7 +300,8 @@ function connectWebSocket() {
 
   ws.onopen = () => {
     setConnectionStatus('connected');
-    ws.send(JSON.stringify({ action: 'list', payload: {} }));
+    ws.send(JSON.stringify({ action: 'list',        payload: {} }));
+    ws.send(JSON.stringify({ action: 'list_assets', payload: {} }));
   };
 
   ws.onmessage = (e) => {
@@ -335,7 +319,6 @@ function connectWebSocket() {
 }
 
 function handleMessage(msg) {
-  // Response to our requests
   if (msg.status === 'success' && msg.action === 'list') {
     repo.reset(msg.data || []);
     for (const t of repo.list()) {
@@ -347,7 +330,6 @@ function handleMessage(msg) {
     return;
   }
 
-  // New target — place immediately at its position, no animation
   if (msg.event === 'target_created') {
     if (!repo.upsert(msg.data)) return;
     const loc = msg.data.tracking_location || {};
@@ -358,7 +340,6 @@ function handleMessage(msg) {
     return;
   }
 
-  // Existing target moved — animate from current display position to new position
   if (msg.event === 'target_updated') {
     if (!repo.upsert(msg.data)) return;
     const loc = msg.data.tracking_location || {};
@@ -382,6 +363,24 @@ function handleMessage(msg) {
     return;
   }
 
+  if (msg.status === 'success' && msg.action === 'list_assets') {
+    assetRepo.reset(msg.data || []);
+    renderAssets();
+    return;
+  }
+
+  if (msg.event === 'asset_created' || msg.event === 'asset_updated') {
+    assetRepo.upsert(msg.data);
+    renderAssets();
+    return;
+  }
+
+  if (msg.event === 'asset_deleted') {
+    assetRepo.delete(msg.data.id);
+    renderAssets();
+    return;
+  }
+
   if (msg.status === 'success' && msg.action === 'sim_start') {
     outSimRunning = true;
     const btn = document.getElementById('out-sim-btn');
@@ -401,11 +400,7 @@ function handleMessage(msg) {
   if (msg.event === 'beam_message') {
     const identity = msg.data.identity || {};
     const sender = identity.name || identity.id || msg.data.account_id || 'Unknown';
-    messages.unshift({
-      sender,
-      content:   msg.data.content || '',
-      timestamp: msg.data.timestamp || '',
-    });
+    messages.unshift({ sender, content: msg.data.content || '', timestamp: msg.data.timestamp || '' });
     if (messages.length > 100) messages.pop();
     unreadMessages++;
     renderMessages();
@@ -415,6 +410,35 @@ function handleMessage(msg) {
 // ---------------------------------------------------------------------------
 // Sidebar list
 // ---------------------------------------------------------------------------
+
+function stateBadgeHtml(state) {
+  const meta = STATE_META[state] || STATE_META.TARGET_STATE_UNKNOWN;
+  return `<span class="state-badge" style="color:${meta.color};background:${meta.bg};border-color:${meta.color}44">
+    <span class="state-icon">${meta.icon}</span>${meta.short}
+  </span>`;
+}
+
+function stateDropdownHtml(currentState) {
+  return Object.entries(STATE_META).map(([key, m]) => `
+    <div class="state-drop-item${currentState === key ? ' current' : ''}" data-state="${key}"
+         style="--item-color:${m.color}">
+      <span class="state-icon">${m.icon}</span>${m.label}
+    </div>`).join('');
+}
+
+function updateTargetState(id, newState) {
+  const current = repo.get(id);
+  if (current) {
+    const updated = { ...current, state: newState, updated_date: { seconds: Math.floor(Date.now() / 1000), nanos: 0 } };
+    repo.upsert(updated);
+    rebuildSource();
+    renderList();
+    if (selectedId === id) renderPopup(updated);
+  }
+  if (ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ action: 'update', payload: { id, state: newState } }));
+  }
+}
 
 function renderList() {
   const container = document.getElementById('target-list');
@@ -435,27 +459,105 @@ function renderList() {
     const loc = t.tracking_location || {};
     const lng = ((loc.longitude || 0) / 1e7).toFixed(4);
     const lat = ((loc.latitude  || 0) / 1e7).toFixed(4);
-    const color = STATE_COLORS[t.state] || STATE_COLORS.TARGET_STATE_UNKNOWN;
-    const stateLabel = STATE_LABELS[t.state] || t.state;
     const displayName = t.label || (t.id ? t.id.split('-')[0].toUpperCase() : '???');
     const updated = formatAge((t.updated_date || {}).seconds || 0);
     const sel = t.id === selectedId ? ' selected' : '';
+    const dropOpen = activeDropdownId === t.id ? ' open' : '';
     return `
       <div class="target-card${sel}" data-id="${t.id}">
-        <div class="target-dot" style="background:${color}"></div>
-        <div class="target-info">
-          <div class="target-id">${displayName}</div>
-          <div class="target-state" style="color:${color}">${stateLabel}</div>
-          <div class="target-coords">${lat}, ${lng}</div>
+        <div class="target-main">
+          <div class="target-row">
+            <div class="target-id">${displayName}</div>
+            <div class="target-updated">${updated}</div>
+          </div>
+          <div class="target-row">
+            <div class="target-coords">${lat}, ${lng}</div>
+            <div class="state-badge-wrap${dropOpen}" data-id="${t.id}">
+              ${stateBadgeHtml(t.state)}
+              <div class="state-dropdown">${stateDropdownHtml(t.state)}</div>
+            </div>
+          </div>
         </div>
-        <div class="target-updated">${updated}</div>
       </div>`;
   }).join('');
 
   container.querySelectorAll('.target-card').forEach(card => {
     card.addEventListener('click', () => selectTarget(card.dataset.id, true));
   });
+
+  container.querySelectorAll('.state-badge-wrap').forEach(wrap => {
+    wrap.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id = wrap.dataset.id;
+      activeDropdownId = activeDropdownId === id ? null : id;
+      renderList();
+    });
+  });
+
+  container.querySelectorAll('.state-drop-item').forEach(item => {
+    item.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id = item.closest('.state-badge-wrap').dataset.id;
+      activeDropdownId = null;
+      updateTargetState(id, item.dataset.state);
+    });
+  });
 }
+
+document.addEventListener('click', () => {
+  if (activeDropdownId !== null) {
+    activeDropdownId = null;
+    renderList();
+  }
+});
+
+function renderAssets() {
+  const container = document.getElementById('asset-list');
+  const list = assetRepo.list();
+
+  if (list.length === 0) {
+    container.innerHTML = '<div class="empty-state">No assets</div>';
+    return;
+  }
+
+  list.sort((a, b) => ((b.updated_date || {}).seconds || 0) - ((a.updated_date || {}).seconds || 0));
+
+  container.innerHTML = list.map(a => {
+    const loc = a.tracking_location || {};
+    const lng = ((loc.longitude || 0) / 1e7).toFixed(4);
+    const lat = ((loc.latitude  || 0) / 1e7).toFixed(4);
+    const name    = a.label || (a.id ? a.id.split('-')[0].toUpperCase() : '???');
+    const updated = formatAge((a.updated_date || {}).seconds || 0);
+    return `
+      <div class="asset-card">
+        <div class="target-main">
+          <div class="target-row">
+            <div class="target-id">${name}</div>
+            <div class="target-updated">${updated}</div>
+          </div>
+          <div class="target-row">
+            <div class="target-coords">${lat}, ${lng}</div>
+            <span class="asset-badge">LOCATION</span>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// ---------------------------------------------------------------------------
+// Tab switching
+// ---------------------------------------------------------------------------
+
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    activeTab = btn.dataset.tab;
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b === btn));
+    document.getElementById('target-list').style.display = activeTab === 'targets' ? '' : 'none';
+    document.getElementById('asset-list').style.display  = activeTab === 'assets'  ? '' : 'none';
+    // Also hide toolbar (populate) on assets tab
+    document.getElementById('sidebar-toolbar').style.display = activeTab === 'targets' ? '' : 'none';
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Messages feed
@@ -472,7 +574,6 @@ function renderMessages() {
     badge.classList.add('hidden');
   }
 
-  // Clear badge when the panel is scrolled into view (user sees messages)
   const section = document.getElementById('messages-section');
   if (section.getBoundingClientRect().height > 0) {
     unreadMessages = 0;
@@ -501,10 +602,8 @@ function renderMessages() {
 
 function escapeHtml(str) {
   return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 function formatAge(unixSeconds) {
@@ -520,14 +619,12 @@ function formatAge(unixSeconds) {
 // ---------------------------------------------------------------------------
 
 function selectTarget(id, flyTo) {
-  // Clear previous selection feature-state
   if (selectedId && selectedId !== id) {
     map.setFeatureState({ source: SOURCE_ID, id: selectedId }, { selected: false });
   }
 
   selectedId = id;
   map.setFeatureState({ source: SOURCE_ID, id }, { selected: true });
-
   renderList();
 
   const t = repo.get(id);
@@ -554,20 +651,30 @@ function renderPopup(t) {
   const lat = (loc.latitude  || 0) / 1e7;
   if (lng === 0 && lat === 0) return;
 
-  const color = STATE_COLORS[t.state] || STATE_COLORS.TARGET_STATE_UNKNOWN;
-  const label = STATE_LABELS[t.state] || t.state;
-  const altM  = ((loc.altitude || 0) / 1000).toFixed(0);
+  const meta    = STATE_META[t.state] || STATE_META.TARGET_STATE_UNKNOWN;
+  const altM    = ((loc.altitude || 0) / 1000).toFixed(0);
   const speedKph = ((loc.speed_over_ground || 0) * 0.0036).toFixed(1);
-  const courseRaw = (loc.course_over_ground || 0) / 1000;
+  const course  = ((loc.course_over_ground || 0) / 1000).toFixed(0);
   const updated = t.updated_date
     ? new Date((t.updated_date.seconds || 0) * 1000).toLocaleTimeString()
     : '--';
 
+  const statePicker = Object.entries(STATE_META).map(([key, m]) => {
+    const isActive = t.state === key;
+    const style = isActive
+      ? `color:${m.color};border-color:${m.color};background:${m.bg}`
+      : `color:${m.color}`;
+    return `<button class="state-pick-btn${isActive ? ' active' : ''}" data-state="${key}" style="${style}" title="${m.label}">
+      <span class="pick-icon">${m.icon}</span>
+      <span class="pick-label">${m.short}</span>
+    </button>`;
+  }).join('');
+
   const html = `
-    <div class="popup-target-id">${t.id}</div>
+    <div class="popup-target-id">${t.label || t.id}</div>
     <div class="popup-row">
       <span class="popup-label">STATE</span>
-      <span class="popup-value" style="color:${color}">${label}</span>
+      <span class="popup-value" style="color:${meta.color}">${meta.icon} ${meta.label}</span>
     </div>
     <div class="popup-row">
       <span class="popup-label">LAT / LNG</span>
@@ -583,26 +690,106 @@ function renderPopup(t) {
     </div>
     <div class="popup-row">
       <span class="popup-label">COURSE</span>
-      <span class="popup-value">${courseRaw.toFixed(0)}°</span>
+      <span class="popup-value">${course}°</span>
     </div>
     <div class="popup-row">
       <span class="popup-label">UPDATED</span>
       <span class="popup-value">${updated}</span>
-    </div>`;
+    </div>
+    <div class="popup-divider"></div>
+    <div class="popup-section-label">SET STATE</div>
+    <div class="popup-state-picker">${statePicker}</div>`;
 
-  popup = new mapboxgl.Popup({ closeButton: true, maxWidth: '260px', offset: 14 })
+  popup = new mapboxgl.Popup({ closeButton: true, maxWidth: '280px', offset: 14 })
     .setLngLat([lng, lat])
-    .setHTML(html)
-    .addTo(map);
+    .setHTML(html);
+
+  popup.on('open', () => {
+    popup.getElement().querySelector('.popup-state-picker').addEventListener('click', (e) => {
+      const btn = e.target.closest('.state-pick-btn');
+      if (!btn) return;
+      const newState = btn.dataset.state;
+
+      // Optimistic update: push to repo immediately so the UI reflects the change now.
+      const current = repo.get(t.id);
+      if (current) {
+        const optimistic = { ...current, state: newState, updated_date: { seconds: Math.floor(Date.now() / 1000), nanos: 0 } };
+        if (repo.upsert(optimistic)) {
+          rebuildSource();
+          renderList();
+          renderPopup(optimistic);
+        }
+      }
+
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ action: 'update', payload: { id: t.id, state: newState } }));
+      }
+    });
+  });
 
   popup.on('close', () => {
-    if (selectedId) {
-      map.setFeatureState({ source: SOURCE_ID, id: selectedId }, { selected: false });
-    }
+    if (selectedId) map.setFeatureState({ source: SOURCE_ID, id: selectedId }, { selected: false });
     selectedId = null;
     renderList();
   });
+
+  popup.addTo(map);
 }
+
+// ---------------------------------------------------------------------------
+// Populate fake targets
+// ---------------------------------------------------------------------------
+
+function randomNearSim(radiusM = 800) {
+  const latDeg = radiusM / 111000;
+  const lngDeg = radiusM / (111000 * Math.cos(SIM_LAT * Math.PI / 180));
+  const angle = Math.random() * 2 * Math.PI;
+  const r = Math.sqrt(Math.random());
+  return {
+    lat: SIM_LAT + r * latDeg * Math.cos(angle),
+    lng: SIM_LNG + r * lngDeg * Math.sin(angle),
+  };
+}
+
+function populateFakeTargets() {
+  const states = Object.keys(STATE_META);
+  const count = Math.min(NATO.length, states.length);
+
+  for (let i = 0; i < count; i++) {
+    const { lat, lng } = randomNearSim();
+    const now = Math.floor(Date.now() / 1000);
+    const target = {
+      id:           crypto.randomUUID(),
+      updated_date: { seconds: now, nanos: 0 },
+      tracking_location: {
+        longitude:          Math.round(lng * 1e7),
+        latitude:           Math.round(lat * 1e7),
+        timestamp:          now,
+        altitude:           0,
+        speed_over_ground:  0,
+        course_over_ground: 0,
+      },
+      state:        states[i],
+      workspace_id: WORKSPACE_ID,
+      label:        NATO[i],
+    };
+
+    // Always push locally so the UI works without a server connection
+    if (repo.create(target)) {
+      setDisplayPosition(target.id, lng, lat);
+    }
+
+    // Also sync to server if connected so other clients see these targets
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ action: 'create', payload: target }));
+    }
+  }
+
+  rebuildSource();
+  renderList();
+}
+
+document.getElementById('populate-btn').addEventListener('click', populateFakeTargets);
 
 // ---------------------------------------------------------------------------
 // Sim loop
@@ -657,7 +844,6 @@ document.querySelectorAll('.basemap-btn').forEach(btn => {
 
     map.setStyle(MAP_STYLES[style]);
 
-    // Re-add layers after style loads
     map.once('style.load', () => {
       addTerrainAndSky();
       initTargetLayers();
