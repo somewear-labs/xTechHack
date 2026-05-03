@@ -67,10 +67,10 @@ async function loadProto() {
   return root.lookupType('TargetResponse');
 }
 
-async function emitTarget(TargetResponse) {
+async function emitTarget(TargetResponse, fixedId) {
   const { lat, lng } = randomNearShack15();
   const now = Math.floor(Date.now() / 1000);
-  const targetId = crypto.randomUUID();
+  const targetId = fixedId || crypto.randomUUID();
 
   const payload = {
     id: targetId,
@@ -119,11 +119,16 @@ async function emitTarget(TargetResponse) {
 }
 
 (async () => {
-  const count = Math.max(1, parseInt(process.argv[2] || '1', 10));
+  const args = process.argv.slice(2);
+  const countArg = args.find(a => !a.startsWith('--'));
+  const count = Math.max(1, parseInt(countArg || '1', 10));
+  const idFlag = args.find(a => a.startsWith('--id='));
+  const fixedId = idFlag ? idFlag.slice(5) : null;
+
   const TargetResponse = await loadProto();
 
   for (let i = 0; i < count; i++) {
-    await emitTarget(TargetResponse);
+    await emitTarget(TargetResponse, fixedId);
     if (i < count - 1) await new Promise((r) => setTimeout(r, 200));
   }
 })().catch((err) => {

@@ -7,8 +7,11 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-app.post('/emit', (_req, res) => {
-  const child = spawn('node', [path.join(__dirname, 'emit-target.js'), '1'], { cwd: __dirname });
+app.use(express.json());
+
+app.post('/emit', (req, res) => {
+  const extraArgs = req.body?.id ? [`--id=${req.body.id}`] : [];
+  const child = spawn('node', [path.join(__dirname, 'emit-target.js'), '1', ...extraArgs], { cwd: __dirname });
   child.stdout.on('data', (d) => process.stdout.write(d));
   child.stderr.on('data', (d) => process.stderr.write(d));
   child.on('close', (code) => {

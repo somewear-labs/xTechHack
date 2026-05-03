@@ -39,7 +39,7 @@ const LAYER_LABEL  = 'targets-label';
 // State
 // ---------------------------------------------------------------------------
 
-let targets = {};           // id → target
+const repo = new TargetRepo();
 let messages = [];          // [{sender, content, timestamp}] newest-first, capped at 100
 let unreadMessages = 0;
 let selectedId = null;
@@ -49,6 +49,7 @@ let map;
 let ws;
 let reconnectTimeout;
 let simInterval = null;
+let simTargetId = null;
 
 // ---------------------------------------------------------------------------
 // Map init
@@ -56,17 +57,43 @@ let simInterval = null;
 
 mapboxgl.accessToken = MAPBOX_TOKEN;
 
+const CAMERA_STORAGE_KEY = 'xtech_map_camera';
+
+function loadCameraState() {
+  try {
+    const saved = localStorage.getItem(CAMERA_STORAGE_KEY);
+    if (saved) return JSON.parse(saved);
+  } catch (_) {}
+  return null;
+}
+
+function saveCameraState() {
+  try {
+    const state = {
+      center: map.getCenter().toArray(),
+      zoom: map.getZoom(),
+      pitch: map.getPitch(),
+      bearing: map.getBearing(),
+    };
+    localStorage.setItem(CAMERA_STORAGE_KEY, JSON.stringify(state));
+  } catch (_) {}
+}
+
+const savedCamera = loadCameraState();
+
 map = new mapboxgl.Map({
   container: 'map',
   style: MAP_STYLES['dark-topo'],
-  center: [-98.5795, 39.8283],
-  zoom: 3,
-  pitch: 40,
-  bearing: 0,
+  center: savedCamera ? savedCamera.center : [-98.5795, 39.8283],
+  zoom: savedCamera ? savedCamera.zoom : 3,
+  pitch: savedCamera ? savedCamera.pitch : 40,
+  bearing: savedCamera ? savedCamera.bearing : 0,
   antialias: true,
 });
 
 map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), 'top-left');
+
+map.on('moveend', saveCameraState);
 
 map.on('load', () => {
   addTerrainAndSky();
@@ -208,10 +235,10 @@ function emptyFeatureCollection() {
 }
 
 function targetToFeature(t) {
+  const display = displayPositions.get(t.id);
   const loc = t.tracking_location || {};
-  const lng = (loc.longitude  || 0) / 1e7;
-  const lat = (loc.latitude   || 0) / 1e7;
-  // Prefer label (set by Beam ingest) over truncated UUID
+  const lng = display ? display.lng : (loc.longitude  || 0) / 1e7;
+  const lat = display ? display.lat : (loc.latitude   || 0) / 1e7;
   const shortId = t.label || (t.id ? t.id.split('-')[0].toUpperCase() : '???');
   return {
     type: 'Feature',
@@ -233,8 +260,48 @@ function targetToFeature(t) {
 function rebuildSource() {
   const src = map.getSource(SOURCE_ID);
   if (!src) return;
-  const features = Object.values(targets).map(targetToFeature);
-  src.setData({ type: 'FeatureCollection', features });
+  src.setData({ type: 'FeatureCollection', features: repo.list().map(targetToFeature) });
+}
+
+// ---------------------------------------------------------------------------
+// Position animation
+// ---------------------------------------------------------------------------
+
+const displayPositions = new Map(); // id → { lng, lat }
+const activeAnimations = new Map(); // id → { startLng, startLat, endLng, endLat, startTime, duration }
+const ANIM_MS = 700;
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+function easeInOut(t) { return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t; }
+
+function setDisplayPosition(id, lng, lat) {
+  displayPositions.set(id, { lng, lat });
+}
+
+function animateToPosition(id, toLng, toLat) {
+  const current = displayPositions.get(id) || { lng: toLng, lat: toLat };
+  activeAnimations.set(id, {
+    startLng: current.lng, startLat: current.lat,
+    endLng: toLng, endLat: toLat,
+    startTime: performance.now(),
+  });
+  if (activeAnimations.size === 1) requestAnimationFrame(animationTick);
+}
+
+function animationTick(now) {
+  let hasActive = false;
+  for (const [id, anim] of activeAnimations) {
+    const t = Math.min((now - anim.startTime) / ANIM_MS, 1);
+    const et = easeInOut(t);
+    displayPositions.set(id, {
+      lng: lerp(anim.startLng, anim.endLng, et),
+      lat: lerp(anim.startLat, anim.endLat, et),
+    });
+    if (t >= 1) activeAnimations.delete(id);
+    else hasActive = true;
+  }
+  rebuildSource();
+  if (hasActive) requestAnimationFrame(animationTick);
 }
 
 // ---------------------------------------------------------------------------
@@ -269,17 +336,32 @@ function connectWebSocket() {
 function handleMessage(msg) {
   // Response to our requests
   if (msg.status === 'success' && msg.action === 'list') {
-    targets = {};
-    (msg.data || []).forEach(t => { targets[t.id] = t; });
+    repo.reset(msg.data || []);
+    for (const t of repo.list()) {
+      const loc = t.tracking_location || {};
+      setDisplayPosition(t.id, (loc.longitude || 0) / 1e7, (loc.latitude || 0) / 1e7);
+    }
     rebuildSource();
     renderList();
     return;
   }
 
-  // Broadcast events
-  if (msg.event === 'target_created' || msg.event === 'target_updated') {
-    targets[msg.data.id] = msg.data;
+  // New target — place immediately at its position, no animation
+  if (msg.event === 'target_created') {
+    if (!repo.upsert(msg.data)) return;
+    const loc = msg.data.tracking_location || {};
+    setDisplayPosition(msg.data.id, (loc.longitude || 0) / 1e7, (loc.latitude || 0) / 1e7);
     rebuildSource();
+    renderList();
+    if (selectedId === msg.data.id) renderPopup(msg.data);
+    return;
+  }
+
+  // Existing target moved — animate from current display position to new position
+  if (msg.event === 'target_updated') {
+    if (!repo.upsert(msg.data)) return;
+    const loc = msg.data.tracking_location || {};
+    animateToPosition(msg.data.id, (loc.longitude || 0) / 1e7, (loc.latitude || 0) / 1e7);
     renderList();
     if (selectedId === msg.data.id) renderPopup(msg.data);
     return;
@@ -287,7 +369,9 @@ function handleMessage(msg) {
 
   if (msg.event === 'target_deleted') {
     const id = msg.data.id;
-    delete targets[id];
+    repo.delete(id);
+    displayPositions.delete(id);
+    activeAnimations.delete(id);
     if (selectedId === id) {
       selectedId = null;
       if (popup) { popup.remove(); popup = null; }
@@ -317,7 +401,7 @@ function handleMessage(msg) {
 
 function renderList() {
   const container = document.getElementById('target-list');
-  const list = Object.values(targets);
+  const list = repo.list();
 
   if (list.length === 0) {
     container.innerHTML = '<div class="empty-state">No targets</div>';
@@ -429,13 +513,14 @@ function selectTarget(id, flyTo) {
 
   renderList();
 
-  const t = targets[id];
+  const t = repo.get(id);
   if (!t) return;
 
   if (flyTo) {
+    const display = displayPositions.get(id);
     const loc = t.tracking_location || {};
-    const lng = (loc.longitude || 0) / 1e7;
-    const lat = (loc.latitude  || 0) / 1e7;
+    const lng = display ? display.lng : (loc.longitude || 0) / 1e7;
+    const lat = display ? display.lat : (loc.latitude  || 0) / 1e7;
     if (lng !== 0 || lat !== 0) {
       map.flyTo({ center: [lng, lat], zoom: Math.max(map.getZoom(), 14), duration: 800 });
     }
@@ -506,16 +591,26 @@ function renderPopup(t) {
 // Sim loop
 // ---------------------------------------------------------------------------
 
+function emitSim() {
+  fetch('/emit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: simTargetId }),
+  });
+}
+
 function toggleSim() {
   const btn = document.getElementById('sim-btn');
   if (simInterval) {
     clearInterval(simInterval);
     simInterval = null;
+    simTargetId = null;
     btn.textContent = 'SIM';
     btn.classList.remove('active');
   } else {
-    fetch('/emit', { method: 'POST' });
-    simInterval = setInterval(() => fetch('/emit', { method: 'POST' }), 2000);
+    simTargetId = crypto.randomUUID();
+    emitSim();
+    simInterval = setInterval(emitSim, 2000);
     btn.textContent = 'STOP';
     btn.classList.add('active');
   }
