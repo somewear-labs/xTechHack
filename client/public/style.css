@@ -571,6 +571,162 @@ html, body {
   border-color: var(--primary-accent);
 }
 
+/* ── HUD overlay ──────────────────────────────── */
+
+#overlay-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 15;
+  overflow: visible;
+}
+
+#overlay-panel {
+  position: absolute;
+  z-index: 16;
+  width: 272px;
+  background: rgba(4, 8, 18, 0.93);
+  border: 1px solid rgba(34, 111, 238, 0.32);
+  box-shadow: 0 0 32px rgba(34, 111, 238, 0.12), inset 0 1px 0 rgba(34, 111, 238, 0.08);
+  pointer-events: auto;
+  display: none;
+}
+
+.ol-c {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+}
+.ol-tl { top: -2px;    left: -2px;  border-top: 2px solid #226FEE; border-left:  2px solid #226FEE; }
+.ol-tr { top: -2px;    right: -2px; border-top: 2px solid #226FEE; border-right: 2px solid #226FEE; }
+.ol-bl { bottom: -2px; left: -2px;  border-bottom: 2px solid #226FEE; border-left:  2px solid #226FEE; }
+.ol-br { bottom: -2px; right: -2px; border-bottom: 2px solid #226FEE; border-right: 2px solid #226FEE; }
+
+.ol-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 9px;
+  border-bottom: 1px solid rgba(34, 111, 238, 0.18);
+}
+
+.ol-title {
+  flex: 1;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font);
+}
+
+.ol-state-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+  font-family: var(--font);
+}
+
+.ol-close {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 10px;
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 2px;
+  line-height: 1;
+  font-family: var(--font);
+  flex-shrink: 0;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.ol-close:hover {
+  color: rgba(255, 255, 255, 0.9);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+.ol-data {
+  padding: 8px 12px 4px;
+}
+
+.ol-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 3px 0;
+}
+
+.ol-key {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: rgba(255, 255, 255, 0.28);
+  font-family: var(--font);
+  flex-shrink: 0;
+}
+
+.ol-val {
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.85);
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font);
+}
+
+.ol-divider {
+  height: 1px;
+  background: rgba(34, 111, 238, 0.15);
+  margin: 4px 0;
+}
+
+.ol-state-label {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: rgba(255, 255, 255, 0.28);
+  padding: 6px 12px 4px;
+  font-family: var(--font);
+}
+
+.ol-state-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  padding: 0 12px 12px;
+}
+
+.ol-state-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 7px 4px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  cursor: pointer;
+  font-family: var(--font);
+  transition: background 0.12s;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.ol-state-btn span:first-child {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.ol-state-btn:hover {
+  background: rgba(255, 255, 255, 0.1) !important;
+}
+
 /* ── Mapbox overrides ─────────────────────────── */
 
 .mapboxgl-ctrl-bottom-left,

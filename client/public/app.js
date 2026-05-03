@@ -47,8 +47,8 @@ const assetRepo = new TargetRepo();
 let messages = [];          // [{sender, content, timestamp}] newest-first, capped at 100
 let unreadMessages = 0;
 let selectedId = null;
-let currentStyle = 'dark-topo';
-let popup = null;
+let currentStyle = 'satellite';
+let overlayState = null; // { id, lng, lat, color }
 let map;
 let ws;
 let reconnectTimeout;
@@ -89,7 +89,7 @@ const savedCamera = loadCameraState();
 
 map = new mapboxgl.Map({
   container: 'map',
-  style: MAP_STYLES['dark-topo'],
+  style: MAP_STYLES['satellite'],
   center:  savedCamera ? savedCamera.center  : [-98.5795, 39.8283],
   zoom:    savedCamera ? savedCamera.zoom    : 3,
   pitch:   savedCamera ? savedCamera.pitch   : 40,
@@ -103,6 +103,7 @@ map.on('moveend', saveCameraState);
 map.on('load', () => {
   addTerrainAndSky();
   initTargetLayers();
+  initMapOverlay();
   connectWebSocket();
   renderMessages();
 });
@@ -361,8 +362,12 @@ function handleMessage(msg) {
     displayPositions.delete(id);
     activeAnimations.delete(id);
     if (selectedId === id) {
+      overlayState = null;
       selectedId = null;
-      if (popup) { popup.remove(); popup = null; }
+      const _p = document.getElementById('overlay-panel');
+      const _s = document.getElementById('overlay-svg');
+      if (_p) _p.style.display = 'none';
+      if (_s) _s.innerHTML = '';
     }
     rebuildSource();
     renderList();
@@ -643,100 +648,197 @@ function selectTarget(id, flyTo) {
     }
   }
 
-  renderPopup(t);
+  renderMapOverlay(t);
 }
 
-function renderPopup(t) {
-  if (popup) popup.remove();
+// ---------------------------------------------------------------------------
+// HUD overlay (replaces Mapbox popup)
+// ---------------------------------------------------------------------------
 
+function initMapOverlay() {
+  const mc = document.getElementById('map-container');
+
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.id = 'overlay-svg';
+  mc.appendChild(svg);
+
+  const panel = document.createElement('div');
+  panel.id = 'overlay-panel';
+  panel.innerHTML = `
+    <span class="ol-c ol-tl"></span><span class="ol-c ol-tr"></span>
+    <span class="ol-c ol-bl"></span><span class="ol-c ol-br"></span>
+    <div id="overlay-inner"></div>`;
+  mc.appendChild(panel);
+
+  map.on('move', positionMapOverlay);
+}
+
+function closeMapOverlay() {
+  overlayState = null;
+  const panel = document.getElementById('overlay-panel');
+  const svg   = document.getElementById('overlay-svg');
+  if (panel) panel.style.display = 'none';
+  if (svg)   svg.innerHTML = '';
+  if (selectedId) {
+    try { map.setFeatureState({ source: SOURCE_ID, id: selectedId }, { selected: false }); } catch (_) {}
+    selectedId = null;
+  }
+  renderList();
+}
+
+function renderMapOverlay(t) {
   const loc = t.tracking_location || {};
   const lng = (loc.longitude || 0) / 1e7;
   const lat = (loc.latitude  || 0) / 1e7;
   if (lng === 0 && lat === 0) return;
 
-  const meta    = STATE_META[t.state] || STATE_META.TARGET_STATE_UNKNOWN;
-  const altM    = ((loc.altitude || 0) / 1000).toFixed(0);
+  const meta     = STATE_META[t.state] || STATE_META.TARGET_STATE_UNKNOWN;
+  const altM     = ((loc.altitude || 0) / 1000).toFixed(0);
   const speedKph = ((loc.speed_over_ground || 0) * 0.0036).toFixed(1);
-  const course  = ((loc.course_over_ground || 0) / 1000).toFixed(0);
-  const updated = t.updated_date
+  const course   = ((loc.course_over_ground || 0) / 1000).toFixed(0);
+  const updated  = t.updated_date
     ? new Date((t.updated_date.seconds || 0) * 1000).toLocaleTimeString()
     : '--';
 
   const statePicker = Object.entries(STATE_META).map(([key, m]) => {
-    const isActive = t.state === key;
-    const style = isActive
-      ? `color:${m.color};border-color:${m.color};background:${m.bg}`
-      : `color:${m.color}`;
-    return `<button class="state-pick-btn${isActive ? ' active' : ''}" data-state="${key}" style="${style}" title="${m.label}">
-      <span class="pick-icon">${m.icon}</span>
-      <span class="pick-label">${m.short}</span>
+    const active = t.state === key;
+    return `<button class="ol-state-btn${active ? ' active' : ''}" data-state="${key}" data-id="${t.id}"
+      style="color:${m.color}${active ? `;border-color:${m.color};background:${m.bg}` : ''}">
+      <span>${m.icon}</span><span>${m.short}</span>
     </button>`;
   }).join('');
 
-  const html = `
-    <div class="popup-target-id">${t.label || t.id}</div>
-    <div class="popup-row">
-      <span class="popup-label">STATE</span>
-      <span class="popup-value" style="color:${meta.color}">${meta.icon} ${meta.label}</span>
+  const inner = document.getElementById('overlay-inner');
+  if (!inner) return;
+  inner.innerHTML = `
+    <div class="ol-header">
+      <span class="ol-title">${t.label || t.id}</span>
+      <span class="ol-state-badge" style="color:${meta.color}">${meta.icon} ${meta.short}</span>
+      <button class="ol-close" onclick="closeMapOverlay()">✕</button>
     </div>
-    <div class="popup-row">
-      <span class="popup-label">LAT / LNG</span>
-      <span class="popup-value">${lat.toFixed(5)}, ${lng.toFixed(5)}</span>
+    <div class="ol-data">
+      <div class="ol-row"><span class="ol-key">LAT / LNG</span><span class="ol-val">${lat.toFixed(5)},&thinsp;${lng.toFixed(5)}</span></div>
+      <div class="ol-row"><span class="ol-key">ALT</span><span class="ol-val">${altM} m</span></div>
+      <div class="ol-row"><span class="ol-key">SPEED</span><span class="ol-val">${speedKph} km/h</span></div>
+      <div class="ol-row"><span class="ol-key">COURSE</span><span class="ol-val">${course}°</span></div>
+      <div class="ol-row"><span class="ol-key">UPDATED</span><span class="ol-val">${updated}</span></div>
     </div>
-    <div class="popup-row">
-      <span class="popup-label">ALT</span>
-      <span class="popup-value">${altM} m</span>
-    </div>
-    <div class="popup-row">
-      <span class="popup-label">SPEED</span>
-      <span class="popup-value">${speedKph} km/h</span>
-    </div>
-    <div class="popup-row">
-      <span class="popup-label">COURSE</span>
-      <span class="popup-value">${course}°</span>
-    </div>
-    <div class="popup-row">
-      <span class="popup-label">UPDATED</span>
-      <span class="popup-value">${updated}</span>
-    </div>
-    <div class="popup-divider"></div>
-    <div class="popup-section-label">SET STATE</div>
-    <div class="popup-state-picker">${statePicker}</div>`;
+    <div class="ol-divider"></div>
+    <div class="ol-state-label">SET STATE</div>
+    <div class="ol-state-grid">${statePicker}</div>`;
 
-  popup = new mapboxgl.Popup({ closeButton: true, maxWidth: '320px', offset: 14 })
-    .setLngLat([lng, lat])
-    .setHTML(html);
-
-  popup.on('open', () => {
-    popup.getElement().querySelector('.popup-state-picker').addEventListener('click', (e) => {
-      const btn = e.target.closest('.state-pick-btn');
-      if (!btn) return;
+  inner.querySelectorAll('.ol-state-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id       = btn.dataset.id;
       const newState = btn.dataset.state;
-
-      // Optimistic update: push to repo immediately so the UI reflects the change now.
-      const current = repo.get(t.id);
+      const current  = repo.get(id);
       if (current) {
         const optimistic = { ...current, state: newState, updated_date: { seconds: Math.floor(Date.now() / 1000), nanos: 0 } };
-        if (repo.upsert(optimistic)) {
-          rebuildSource();
-          renderList();
-          renderPopup(optimistic);
-        }
+        if (repo.upsert(optimistic)) { rebuildSource(); renderList(); renderMapOverlay(optimistic); }
       }
-
       if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ action: 'update', payload: { id: t.id, state: newState } }));
+        ws.send(JSON.stringify({ action: 'update', payload: { id, state: newState } }));
       }
     });
   });
 
-  popup.on('close', () => {
-    if (selectedId) map.setFeatureState({ source: SOURCE_ID, id: selectedId }, { selected: false });
-    selectedId = null;
-    renderList();
-  });
+  overlayState = { id: t.id, lng, lat, color: meta.color };
+  const panel = document.getElementById('overlay-panel');
+  if (panel) panel.style.display = 'block';
+  positionMapOverlay();
+}
 
-  popup.addTo(map);
+function positionMapOverlay() {
+  if (!overlayState) return;
+  const panel = document.getElementById('overlay-panel');
+  const svg   = document.getElementById('overlay-svg');
+  if (!panel || !svg || panel.style.display === 'none') return;
+
+  const display = displayPositions.get(overlayState.id);
+  const lng = display ? display.lng : overlayState.lng;
+  const lat = display ? display.lat : overlayState.lat;
+  const pt  = map.project([lng, lat]);
+
+  const PW  = panel.offsetWidth  || 272;
+  const PH  = panel.offsetHeight || 200;
+  const GAP = 72;
+  const mc  = document.getElementById('map-container');
+  const MCW = mc.offsetWidth;
+  const MCH = mc.offsetHeight;
+
+  const color  = overlayState.color || '#226FEE';
+  const tx     = pt.x;
+  const ty     = pt.y;
+
+  // Diagonal segment length (~45° / 2 o'clock), then horizontal right to panel
+  const DIAG   = 72;
+  const d      = DIAG / Math.SQRT2;   // ≈ 51px each axis
+
+  // Panel positioned so its bottom aligns with the joint y
+  let px = tx + GAP + 100;
+  let py = ty - d - PH;
+  px = Math.max(4, Math.min(px, MCW - PW - 4));
+  py = Math.max(4, Math.min(py, MCH - PH - 4));
+
+  panel.style.left = `${px}px`;
+  panel.style.top  = `${py}px`;
+
+  const bx  = px;        // panel bottom-left x
+  const by  = py + PH;   // panel bottom y
+  // Joint: same y as panel bottom; x offset equals vertical rise → 45°
+  const jx  = tx + (ty - by);
+  const jy  = by;
+
+  // Path: diagonal up-right from target center → joint → horizontal right to panel bottom-left
+  const stemPath = `M ${tx} ${ty} L ${jx} ${jy} L ${bx} ${jy}`;
+
+  // Perpendicular tick at stem start (rotated 90° from 45° diagonal = ±135° direction)
+  const tk  = 10;
+  const tkx = tk / Math.SQRT2;   // ≈ 7.1
+  const tky = tk / Math.SQRT2;
+
+  svg.innerHTML = `
+    <defs>
+      <filter id="ol-glow" x="-80%" y="-80%" width="260%" height="260%">
+        <feGaussianBlur in="SourceGraphic" stdDeviation="3.5" result="b"/>
+        <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+    </defs>
+    <!-- Stem: outer halo -->
+    <path d="${stemPath}" fill="none" stroke="${color}" stroke-width="10"
+          opacity="0.10" stroke-linecap="square" stroke-linejoin="miter"/>
+    <!-- Stem: mid glow -->
+    <path d="${stemPath}" fill="none" stroke="${color}" stroke-width="5"
+          opacity="0.20" stroke-linecap="square" stroke-linejoin="miter"/>
+    <!-- Stem: core -->
+    <path d="${stemPath}" fill="none" stroke="${color}" stroke-width="2"
+          opacity="0.95" stroke-linecap="square" stroke-linejoin="miter"
+          filter="url(#ol-glow)"/>
+    <!-- Target-end node -->
+    <circle cx="${tx}" cy="${ty}" r="4.5" fill="${color}" opacity="0.95" filter="url(#ol-glow)"/>
+    <circle cx="${tx}" cy="${ty}" r="2"   fill="#fff"     opacity="0.6"/>
+    <!-- Perpendicular tick at stem start (45° rotated) -->
+    <line x1="${tx - tkx}" y1="${ty - tky}" x2="${tx + tkx}" y2="${ty + tky}"
+          stroke="${color}" stroke-width="2.5" opacity="0.95" stroke-linecap="round"
+          filter="url(#ol-glow)"/>
+    <!-- Joint node (diagonal → horizontal turn) -->
+    <circle cx="${jx}" cy="${jy}" r="4" fill="${color}" opacity="0.9" filter="url(#ol-glow)"/>
+    <circle cx="${jx}" cy="${jy}" r="2" fill="#fff"     opacity="0.6"/>
+    <!-- Panel bottom-left attach node -->
+    <circle cx="${bx}" cy="${by}" r="5"   fill="${color}" opacity="0.95" filter="url(#ol-glow)"/>
+    <circle cx="${bx}" cy="${by}" r="2.5" fill="#fff"    opacity="0.6"/>
+    <!-- Outer reticle ring (dashed) -->
+    <circle cx="${tx}" cy="${ty}" r="22" fill="none" stroke="${color}"
+            stroke-width="1" stroke-dasharray="5 4" opacity="0.5"/>
+    <!-- Inner reticle ring -->
+    <circle cx="${tx}" cy="${ty}" r="11" fill="none" stroke="${color}"
+            stroke-width="1" opacity="0.35"/>
+    <!-- Cardinal tick marks -->
+    <line x1="${tx}"      y1="${ty - 30}" x2="${tx}"      y2="${ty - 24}" stroke="${color}" stroke-width="1.5" opacity="0.75"/>
+    <line x1="${tx}"      y1="${ty + 24}" x2="${tx}"      y2="${ty + 30}" stroke="${color}" stroke-width="1.5" opacity="0.75"/>
+    <line x1="${tx - 30}" y1="${ty}"      x2="${tx - 24}" y2="${ty}"      stroke="${color}" stroke-width="1.5" opacity="0.75"/>
+    <line x1="${tx + 24}" y1="${ty}"      x2="${tx + 30}" y2="${ty}"      stroke="${color}" stroke-width="1.5" opacity="0.75"/>`;
 }
 
 // ---------------------------------------------------------------------------
