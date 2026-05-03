@@ -633,7 +633,7 @@ function selectTarget(id, flyTo) {
     const lng = display ? display.lng : (loc.longitude || 0) / 1e7;
     const lat = display ? display.lat : (loc.latitude  || 0) / 1e7;
     if (lng !== 0 || lat !== 0) {
-      map.flyTo({ center: [lng, lat], zoom: 14, duration: 800 });
+      map.flyTo({ center: [lng, lat], zoom: 14, duration: 800, pitch: map.getPitch(), bearing: map.getBearing() });
     }
   }
 
