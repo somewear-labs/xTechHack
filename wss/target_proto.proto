@@ -62,3 +62,10 @@ message TargetResponse {
 message TargetResponseList {
     repeated TargetResponse targets = 1;
 }
+
+// Inbound state update over UDS. Field tags match TargetResponse so a sender
+// could ship a full TargetResponse and we'd parse just id + state.
+message TargetUpdate {
+    uint64 id = 1;
+    TargetState state = 4;
+}

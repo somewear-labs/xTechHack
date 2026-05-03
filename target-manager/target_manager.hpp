@@ -16,6 +16,8 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 
 
@@ -39,6 +41,17 @@ struct Target {
     float bbox_top    = 0.0f;
     float bbox_width  = 0.0f;
     float bbox_height = 0.0f;
+
+    // Most recent ReID embedding, L2-normalized. Empty until a tracker frame
+    // delivers NVDS_TRACKER_OBJ_REID_META for this id. Captured at the moment
+    // we go INACTIVE so the same person can't sneak back under a new track id.
+    std::vector<float> reid_feature;
+
+    // Set when an inbound TargetUpdate(state=ACTIVE) arrives. flusher emits
+    // TARGET_STATE_ACTIVE in the next TargetResponse so the round trip is
+    // observable end-to-end. INACTIVE is terminal and lives in the
+    // TargetManager's inactive set instead.
+    bool active_ack = false;
 
     Target(int class_id, std::uint64_t obj_id) {
         // (class_id + 1) in high 32 bits guarantees high half >= 1, so id is
@@ -66,6 +79,19 @@ private:
     std::shared_ptr<curl_slist> headers_;
     std::unordered_map<std::uint64_t, std::shared_ptr<Target>> targets_;
     std::mutex targets_mu_;
+
+    // Terminal suppression set: ids that arrived over the inbound socket with
+    // state=INACTIVE. Once in here, the id is dropped from `targets_` and
+    // filtered out of every subsequent on_batch — never reactivated.
+    std::unordered_set<std::uint64_t> inactive_ids_;
+    // ReID embeddings captured at the moment of INACTIVE. New tracks with a
+    // ReID feature within `reid_sim_threshold_` cosine similarity of any entry
+    // here get suppressed too — covers re-entry under a fresh tracker id.
+    std::vector<std::vector<float>>   banned_features_;
+    std::mutex                        inactive_mu_;
+    float                             reid_sim_threshold_ = 0.7f;
+    std::size_t                       reid_max_banned_    = 256;
+    bool                              verbose_frames_     = false;
     std::shared_ptr<CameraGeolocator> geo_;
 
     // Flusher thread — every TM_DELTA_CADENCE_SEC, POST dirty targets to Beam.

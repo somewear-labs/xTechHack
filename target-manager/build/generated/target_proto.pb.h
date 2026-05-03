@@ -48,7 +48,7 @@ struct TableStruct_target_5fproto_2eproto {
     PROTOBUF_SECTION_VARIABLE(protodesc_cold);
   static const ::PROTOBUF_NAMESPACE_ID::internal::AuxillaryParseTableField aux[]
     PROTOBUF_SECTION_VARIABLE(protodesc_cold);
-  static const ::PROTOBUF_NAMESPACE_ID::internal::ParseTable schema[6]
+  static const ::PROTOBUF_NAMESPACE_ID::internal::ParseTable schema[7]
     PROTOBUF_SECTION_VARIABLE(protodesc_cold);
   static const ::PROTOBUF_NAMESPACE_ID::internal::FieldMetadata field_metadata[];
   static const ::PROTOBUF_NAMESPACE_ID::internal::SerializationTable serialization_table[];
@@ -61,6 +61,9 @@ extern TargetResponseDefaultTypeInternal _TargetResponse_default_instance_;
 class TargetResponseList;
 class TargetResponseListDefaultTypeInternal;
 extern TargetResponseListDefaultTypeInternal _TargetResponseList_default_instance_;
+class TargetUpdate;
+class TargetUpdateDefaultTypeInternal;
+extern TargetUpdateDefaultTypeInternal _TargetUpdate_default_instance_;
 class Timestamp;
 class TimestampDefaultTypeInternal;
 extern TimestampDefaultTypeInternal _Timestamp_default_instance_;
@@ -76,6 +79,7 @@ extern TrackingLocationDtoDefaultTypeInternal _TrackingLocationDto_default_insta
 PROTOBUF_NAMESPACE_OPEN
 template<> ::TargetResponse* Arena::CreateMaybeMessage<::TargetResponse>(Arena*);
 template<> ::TargetResponseList* Arena::CreateMaybeMessage<::TargetResponseList>(Arena*);
+template<> ::TargetUpdate* Arena::CreateMaybeMessage<::TargetUpdate>(Arena*);
 template<> ::Timestamp* Arena::CreateMaybeMessage<::Timestamp>(Arena*);
 template<> ::TrackingLocationDelta* Arena::CreateMaybeMessage<::TrackingLocationDelta>(Arena*);
 template<> ::TrackingLocationDeltaList* Arena::CreateMaybeMessage<::TrackingLocationDeltaList>(Arena*);
@@ -928,6 +932,7 @@ class TargetResponse PROTOBUF_FINAL :
     kTrackingLocationFieldNumber = 3,
     kIdFieldNumber = 1,
     kWorkspaceIdFieldNumber = 5,
+    kBboxFieldNumber = 6,
     kStateFieldNumber = 4,
   };
   // .Timestamp updated_date = 2;
@@ -984,6 +989,15 @@ class TargetResponse PROTOBUF_FINAL :
   void _internal_set_workspace_id(::PROTOBUF_NAMESPACE_ID::uint64 value);
   public:
 
+  // fixed64 bbox = 6;
+  void clear_bbox();
+  ::PROTOBUF_NAMESPACE_ID::uint64 bbox() const;
+  void set_bbox(::PROTOBUF_NAMESPACE_ID::uint64 value);
+  private:
+  ::PROTOBUF_NAMESPACE_ID::uint64 _internal_bbox() const;
+  void _internal_set_bbox(::PROTOBUF_NAMESPACE_ID::uint64 value);
+  public:
+
   // .TargetState state = 4;
   void clear_state();
   ::TargetState state() const;
@@ -1004,6 +1018,7 @@ class TargetResponse PROTOBUF_FINAL :
   ::TrackingLocationDto* tracking_location_;
   ::PROTOBUF_NAMESPACE_ID::uint64 id_;
   ::PROTOBUF_NAMESPACE_ID::uint64 workspace_id_;
+  ::PROTOBUF_NAMESPACE_ID::uint64 bbox_;
   int state_;
   mutable ::PROTOBUF_NAMESPACE_ID::internal::CachedSize _cached_size_;
   friend struct ::TableStruct_target_5fproto_2eproto;
@@ -1151,6 +1166,154 @@ class TargetResponseList PROTOBUF_FINAL :
   typedef void InternalArenaConstructable_;
   typedef void DestructorSkippable_;
   ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::TargetResponse > targets_;
+  mutable ::PROTOBUF_NAMESPACE_ID::internal::CachedSize _cached_size_;
+  friend struct ::TableStruct_target_5fproto_2eproto;
+};
+// -------------------------------------------------------------------
+
+class TargetUpdate PROTOBUF_FINAL :
+    public ::PROTOBUF_NAMESPACE_ID::Message /* @@protoc_insertion_point(class_definition:TargetUpdate) */ {
+ public:
+  inline TargetUpdate() : TargetUpdate(nullptr) {};
+  virtual ~TargetUpdate();
+
+  TargetUpdate(const TargetUpdate& from);
+  TargetUpdate(TargetUpdate&& from) noexcept
+    : TargetUpdate() {
+    *this = ::std::move(from);
+  }
+
+  inline TargetUpdate& operator=(const TargetUpdate& from) {
+    CopyFrom(from);
+    return *this;
+  }
+  inline TargetUpdate& operator=(TargetUpdate&& from) noexcept {
+    if (GetArena() == from.GetArena()) {
+      if (this != &from) InternalSwap(&from);
+    } else {
+      CopyFrom(from);
+    }
+    return *this;
+  }
+
+  static const ::PROTOBUF_NAMESPACE_ID::Descriptor* descriptor() {
+    return GetDescriptor();
+  }
+  static const ::PROTOBUF_NAMESPACE_ID::Descriptor* GetDescriptor() {
+    return GetMetadataStatic().descriptor;
+  }
+  static const ::PROTOBUF_NAMESPACE_ID::Reflection* GetReflection() {
+    return GetMetadataStatic().reflection;
+  }
+  static const TargetUpdate& default_instance();
+
+  static void InitAsDefaultInstance();  // FOR INTERNAL USE ONLY
+  static inline const TargetUpdate* internal_default_instance() {
+    return reinterpret_cast<const TargetUpdate*>(
+               &_TargetUpdate_default_instance_);
+  }
+  static constexpr int kIndexInFileMessages =
+    6;
+
+  friend void swap(TargetUpdate& a, TargetUpdate& b) {
+    a.Swap(&b);
+  }
+  inline void Swap(TargetUpdate* other) {
+    if (other == this) return;
+    if (GetArena() == other->GetArena()) {
+      InternalSwap(other);
+    } else {
+      ::PROTOBUF_NAMESPACE_ID::internal::GenericSwap(this, other);
+    }
+  }
+  void UnsafeArenaSwap(TargetUpdate* other) {
+    if (other == this) return;
+    GOOGLE_DCHECK(GetArena() == other->GetArena());
+    InternalSwap(other);
+  }
+
+  // implements Message ----------------------------------------------
+
+  inline TargetUpdate* New() const final {
+    return CreateMaybeMessage<TargetUpdate>(nullptr);
+  }
+
+  TargetUpdate* New(::PROTOBUF_NAMESPACE_ID::Arena* arena) const final {
+    return CreateMaybeMessage<TargetUpdate>(arena);
+  }
+  void CopyFrom(const ::PROTOBUF_NAMESPACE_ID::Message& from) final;
+  void MergeFrom(const ::PROTOBUF_NAMESPACE_ID::Message& from) final;
+  void CopyFrom(const TargetUpdate& from);
+  void MergeFrom(const TargetUpdate& from);
+  PROTOBUF_ATTRIBUTE_REINITIALIZES void Clear() final;
+  bool IsInitialized() const final;
+
+  size_t ByteSizeLong() const final;
+  const char* _InternalParse(const char* ptr, ::PROTOBUF_NAMESPACE_ID::internal::ParseContext* ctx) final;
+  ::PROTOBUF_NAMESPACE_ID::uint8* _InternalSerialize(
+      ::PROTOBUF_NAMESPACE_ID::uint8* target, ::PROTOBUF_NAMESPACE_ID::io::EpsCopyOutputStream* stream) const final;
+  int GetCachedSize() const final { return _cached_size_.Get(); }
+
+  private:
+  inline void SharedCtor();
+  inline void SharedDtor();
+  void SetCachedSize(int size) const final;
+  void InternalSwap(TargetUpdate* other);
+  friend class ::PROTOBUF_NAMESPACE_ID::internal::AnyMetadata;
+  static ::PROTOBUF_NAMESPACE_ID::StringPiece FullMessageName() {
+    return "TargetUpdate";
+  }
+  protected:
+  explicit TargetUpdate(::PROTOBUF_NAMESPACE_ID::Arena* arena);
+  private:
+  static void ArenaDtor(void* object);
+  inline void RegisterArenaDtor(::PROTOBUF_NAMESPACE_ID::Arena* arena);
+  public:
+
+  ::PROTOBUF_NAMESPACE_ID::Metadata GetMetadata() const final;
+  private:
+  static ::PROTOBUF_NAMESPACE_ID::Metadata GetMetadataStatic() {
+    ::PROTOBUF_NAMESPACE_ID::internal::AssignDescriptors(&::descriptor_table_target_5fproto_2eproto);
+    return ::descriptor_table_target_5fproto_2eproto.file_level_metadata[kIndexInFileMessages];
+  }
+
+  public:
+
+  // nested types ----------------------------------------------------
+
+  // accessors -------------------------------------------------------
+
+  enum : int {
+    kIdFieldNumber = 1,
+    kStateFieldNumber = 4,
+  };
+  // uint64 id = 1;
+  void clear_id();
+  ::PROTOBUF_NAMESPACE_ID::uint64 id() const;
+  void set_id(::PROTOBUF_NAMESPACE_ID::uint64 value);
+  private:
+  ::PROTOBUF_NAMESPACE_ID::uint64 _internal_id() const;
+  void _internal_set_id(::PROTOBUF_NAMESPACE_ID::uint64 value);
+  public:
+
+  // .TargetState state = 4;
+  void clear_state();
+  ::TargetState state() const;
+  void set_state(::TargetState value);
+  private:
+  ::TargetState _internal_state() const;
+  void _internal_set_state(::TargetState value);
+  public:
+
+  // @@protoc_insertion_point(class_scope:TargetUpdate)
+ private:
+  class _Internal;
+
+  template <typename T> friend class ::PROTOBUF_NAMESPACE_ID::Arena::InternalHelper;
+  typedef void InternalArenaConstructable_;
+  typedef void DestructorSkippable_;
+  ::PROTOBUF_NAMESPACE_ID::uint64 id_;
+  int state_;
   mutable ::PROTOBUF_NAMESPACE_ID::internal::CachedSize _cached_size_;
   friend struct ::TableStruct_target_5fproto_2eproto;
 };
@@ -1803,6 +1966,26 @@ inline void TargetResponse::set_workspace_id(::PROTOBUF_NAMESPACE_ID::uint64 val
   // @@protoc_insertion_point(field_set:TargetResponse.workspace_id)
 }
 
+// fixed64 bbox = 6;
+inline void TargetResponse::clear_bbox() {
+  bbox_ = PROTOBUF_ULONGLONG(0);
+}
+inline ::PROTOBUF_NAMESPACE_ID::uint64 TargetResponse::_internal_bbox() const {
+  return bbox_;
+}
+inline ::PROTOBUF_NAMESPACE_ID::uint64 TargetResponse::bbox() const {
+  // @@protoc_insertion_point(field_get:TargetResponse.bbox)
+  return _internal_bbox();
+}
+inline void TargetResponse::_internal_set_bbox(::PROTOBUF_NAMESPACE_ID::uint64 value) {
+  
+  bbox_ = value;
+}
+inline void TargetResponse::set_bbox(::PROTOBUF_NAMESPACE_ID::uint64 value) {
+  _internal_set_bbox(value);
+  // @@protoc_insertion_point(field_set:TargetResponse.bbox)
+}
+
 // -------------------------------------------------------------------
 
 // TargetResponseList
@@ -1846,9 +2029,55 @@ TargetResponseList::targets() const {
   return targets_;
 }
 
+// -------------------------------------------------------------------
+
+// TargetUpdate
+
+// uint64 id = 1;
+inline void TargetUpdate::clear_id() {
+  id_ = PROTOBUF_ULONGLONG(0);
+}
+inline ::PROTOBUF_NAMESPACE_ID::uint64 TargetUpdate::_internal_id() const {
+  return id_;
+}
+inline ::PROTOBUF_NAMESPACE_ID::uint64 TargetUpdate::id() const {
+  // @@protoc_insertion_point(field_get:TargetUpdate.id)
+  return _internal_id();
+}
+inline void TargetUpdate::_internal_set_id(::PROTOBUF_NAMESPACE_ID::uint64 value) {
+  
+  id_ = value;
+}
+inline void TargetUpdate::set_id(::PROTOBUF_NAMESPACE_ID::uint64 value) {
+  _internal_set_id(value);
+  // @@protoc_insertion_point(field_set:TargetUpdate.id)
+}
+
+// .TargetState state = 4;
+inline void TargetUpdate::clear_state() {
+  state_ = 0;
+}
+inline ::TargetState TargetUpdate::_internal_state() const {
+  return static_cast< ::TargetState >(state_);
+}
+inline ::TargetState TargetUpdate::state() const {
+  // @@protoc_insertion_point(field_get:TargetUpdate.state)
+  return _internal_state();
+}
+inline void TargetUpdate::_internal_set_state(::TargetState value) {
+  
+  state_ = value;
+}
+inline void TargetUpdate::set_state(::TargetState value) {
+  _internal_set_state(value);
+  // @@protoc_insertion_point(field_set:TargetUpdate.state)
+}
+
 #ifdef __GNUC__
   #pragma GCC diagnostic pop
 #endif  // __GNUC__
+// -------------------------------------------------------------------
+
 // -------------------------------------------------------------------
 
 // -------------------------------------------------------------------

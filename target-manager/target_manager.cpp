@@ -13,6 +13,7 @@
 
 #include <chrono>
 #include <cinttypes>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -54,8 +55,34 @@ int getenv_int(const char *name, int fallback) {
     try { return std::stoi(v); } catch (...) { return fallback; }
 }
 
+float getenv_float(const char *name, float fallback) {
+    const char *v = std::getenv(name);
+    if (!v || !*v) return fallback;
+    try { return std::stof(v); } catch (...) { return fallback; }
+}
+
 std::int64_t now_unix_seconds() {
     return static_cast<std::int64_t>(std::time(nullptr));
+}
+
+// Copy + L2-normalize. Returns empty if input is null/empty/zero-norm.
+std::vector<float> l2_normalize_copy(const float *src, std::uint32_t n) {
+    if (!src || n == 0) return {};
+    std::vector<float> out(src, src + n);
+    double sumsq = 0.0;
+    for (float x : out) sumsq += static_cast<double>(x) * x;
+    double norm = std::sqrt(sumsq);
+    if (norm < 1e-6) return {};
+    float inv = static_cast<float>(1.0 / norm);
+    for (float &x : out) x *= inv;
+    return out;
+}
+
+float dot(const std::vector<float> &a, const std::vector<float> &b) {
+    if (a.size() != b.size()) return -1.0f;
+    float acc = 0.0f;
+    for (std::size_t i = 0; i < a.size(); ++i) acc += a[i] * b[i];
+    return acc;
 }
 
 }  // namespace
@@ -64,9 +91,12 @@ TargetManager::TargetManager(std::string beam_url, std::string inbound_socket_pa
     : beam_url_(std::move(beam_url))
     , inbound_socket_path_(std::move(inbound_socket_path))
 {
-    cadence_sec_    = getenv_int("TM_DELTA_CADENCE_SEC", 5);
-    beam_api_url_   = getenv_or("TM_BEAM_URL",       "http://localhost:9091/api/package/async");
-    beam_workspace_ = getenv_or("TM_WORKSPACE_ID",   "71556");
+    cadence_sec_         = getenv_int("TM_DELTA_CADENCE_SEC", 5);
+    beam_api_url_        = getenv_or("TM_BEAM_URL",       "http://localhost:9091/api/package/async");
+    beam_workspace_      = getenv_or("TM_WORKSPACE_ID",   "71556");
+    reid_sim_threshold_  = getenv_float("TM_REID_THRESHOLD", 0.7f);
+    reid_max_banned_     = static_cast<std::size_t>(getenv_int("TM_REID_MAX_BANNED", 256));
+    verbose_frames_      = getenv_int("TM_VERBOSE", 0) != 0;
 }
 
 TargetManager::~TargetManager() {
@@ -130,25 +160,97 @@ void TargetManager::inbound_loop() {
     constexpr size_t kMaxDgram = 65536;
     std::vector<unsigned char> buf(kMaxDgram);
 
+    // stdout is shared with on_batch's high-rate prints; under load the docker
+    // log pipe back-pressures and inbound printfs can stall waiting for the
+    // FILE lock. Mirror every event into a dedicated file FIRST so the test
+    // record survives even if stdout is jammed.
+    const char *log_path = getenv_or("TM_INBOUND_LOG", "/tmp/tm-inbound.log");
+    std::FILE *flog = nullptr;
+    if (log_path && *log_path) {
+        flog = std::fopen(log_path, "a");
+        if (!flog) {
+            std::printf("[tm-inbound] fopen(%s) failed: %s\n", log_path, std::strerror(errno));
+            std::fflush(stdout);
+        } else {
+            std::setvbuf(flog, nullptr, _IOLBF, 0);
+            std::fprintf(flog, "[tm-inbound] log opened\n");
+            std::fflush(flog);
+        }
+    }
+
+#define LOG2(...) do { \
+    if (flog) { std::fprintf(flog, __VA_ARGS__); std::fflush(flog); } \
+    std::printf(__VA_ARGS__); std::fflush(stdout); \
+} while (0)
+
     while (running_.load() && inbound_fd_ >= 0) {
         ssize_t n = ::recv(inbound_fd_, buf.data(), buf.size(), 0);
         if (n < 0) {
             if (errno == EINTR) continue;
             if (!running_.load()) break;
-            std::printf("[tm-inbound] recv error: %s\n", std::strerror(errno));
+            LOG2("[tm-inbound] recv error: %s\n", std::strerror(errno));
             break;
         }
         if (n == 0) continue;
 
-        std::printf("[tm-inbound] recv %zd bytes:", n);
-        for (ssize_t i = 0; i < n && i < 256; ++i) {
-            if ((i & 0xF) == 0) std::printf("\n  ");
-            std::printf(" %02x", buf[i]);
+        TargetUpdate u;
+        if (!u.ParseFromArray(buf.data(), static_cast<int>(n))) {
+            LOG2("[tm-inbound] parse failed (%zd bytes)\n", n);
+            continue;
         }
-        if (n > 256) std::printf("\n  ... (%zd more bytes)", n - 256);
-        std::printf("\n");
-        std::fflush(stdout);
+
+        const std::uint64_t id = u.id();
+        switch (u.state()) {
+            case TARGET_STATE_ACTIVE: {
+                bool found = false;
+                {
+                    std::lock_guard<std::mutex> lk(targets_mu_);
+                    auto it = targets_.find(id);
+                    if (it != targets_.end() && it->second) {
+                        it->second->active_ack = true;
+                        it->second->dirty      = true;   // surface the state on the next flush
+                        found = true;
+                    }
+                }
+                LOG2("[tm-inbound] id=%" PRIu64 " -> ACTIVE%s\n",
+                     id, found ? "" : " [unknown id, ignored]");
+                break;
+            }
+            case TARGET_STATE_INACTIVE: {
+                // Lift the live ReID feature off the target before we drop it,
+                // so future re-entries with a fresh tracker id still get caught.
+                std::vector<float> captured;
+                {
+                    std::lock_guard<std::mutex> lk(targets_mu_);
+                    auto it = targets_.find(id);
+                    if (it != targets_.end() && it->second) {
+                        captured = std::move(it->second->reid_feature);
+                    }
+                    targets_.erase(id);
+                }
+                bool reid_banked = false;
+                {
+                    std::lock_guard<std::mutex> lk(inactive_mu_);
+                    inactive_ids_.insert(id);
+                    if (!captured.empty() && banned_features_.size() < reid_max_banned_) {
+                        banned_features_.push_back(std::move(captured));
+                        reid_banked = true;
+                    }
+                }
+                LOG2("[tm-inbound] id=%" PRIu64 " -> INACTIVE (terminal)%s\n",
+                     id, reid_banked ? " [reid banked]" : "");
+                break;
+            }
+            default:
+                LOG2("[tm-inbound] id=%" PRIu64 " state=%d (ignored)\n",
+                     id, static_cast<int>(u.state()));
+                break;
+        }
     }
+
+#undef LOG2
+
+    if (flog) std::fclose(flog);
 }
 
 void TargetManager::flusher_loop() {
@@ -197,7 +299,7 @@ void TargetManager::post_target(const Target &t) {
     loc->set_latitude (static_cast<std::int32_t>(t.latitude  * 1e7));
     loc->set_longitude(static_cast<std::int32_t>(t.longitude * 1e7));
     loc->set_timestamp(static_cast<std::uint32_t>(t.last_seen ? t.last_seen : now_unix_seconds()));
-    msg.set_state(::TARGET_STATE_UNKNOWN);
+    msg.set_state(t.active_ack ? ::TARGET_STATE_ACTIVE : ::TARGET_STATE_UNKNOWN);
     if (!beam_workspace_.empty()) {
         try { msg.set_workspace_id(std::stoull(beam_workspace_)); } catch (...) {}
     }
@@ -257,28 +359,50 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
 
     for (NvDsMetaList *lf = batch_meta->frame_meta_list; lf; lf = lf->next) {
         auto *frame_meta = static_cast<NvDsFrameMeta *>(lf->data);
-        std::printf("[tm] frame=%u pad=%u objs=%u\n",
-                    frame_meta->frame_num, frame_meta->pad_index, frame_meta->num_obj_meta);
+        if (verbose_frames_) {
+            std::printf("[tm] frame=%u pad=%u objs=%u\n",
+                        frame_meta->frame_num, frame_meta->pad_index, frame_meta->num_obj_meta);
+        }
 
-        for (NvDsMetaList *lo = frame_meta->obj_meta_list; lo; lo = lo->next) {
+        // Cache next before the body since we may remove the current node.
+        for (NvDsMetaList *lo = frame_meta->obj_meta_list, *lo_next = nullptr; lo; lo = lo_next) {
+            lo_next = lo->next;
             auto *obj      = static_cast<NvDsObjectMeta *>(lo->data);
             const auto &bb = obj->tracker_bbox_info.org_bbox_coords;
+
+            // Mirrors the Target ctor packing in target_manager.hpp.
+            const std::uint64_t packed_id =
+                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(obj->class_id) + 1) << 32) |
+                obj->object_id;
+            {
+                std::lock_guard<std::mutex> lk(inactive_mu_);
+                if (inactive_ids_.count(packed_id)) {
+                    std::printf("  obj id=%" PRIu64 " class=%d SUPPRESSED (inactive) -> remove from frame\n",
+                                obj->object_id, obj->class_id);
+                    nvds_remove_obj_meta_from_frame(frame_meta, obj);
+                    continue;
+                }
+            }
 
             double foot_u = static_cast<double>(bb.left) + bb.width  * 0.5;
             double foot_v = static_cast<double>(bb.top)  + bb.height;
 
-            const float *world_xyz = nullptr;
-            const float *visibility = nullptr;
-            uint32_t reid_size = 0;
+            const float *world_xyz       = nullptr;
+            const float *visibility      = nullptr;
+            const float *reid_feature    = nullptr;
+            uint32_t     reid_size       = 0;
 
             for (NvDsUserMetaList *lu = obj->obj_user_meta_list; lu; lu = lu->next) {
                 auto *um = static_cast<NvDsUserMeta *>(lu->data);
                 if (!um || !um->user_meta_data) continue;
 
                 switch (static_cast<int>(um->base_meta.meta_type)) {
-                    case NVDS_TRACKER_OBJ_REID_META:
-                        reid_size = static_cast<NvDsObjReid *>(um->user_meta_data)->featureSize;
+                    case NVDS_TRACKER_OBJ_REID_META: {
+                        auto *r        = static_cast<NvDsObjReid *>(um->user_meta_data);
+                        reid_size      = r->featureSize;
+                        reid_feature   = r->ptr_host;
                         break;
+                    }
                     case NVDS_OBJ_IMAGE_FOOT_LOCATION: {
                         auto *uv = static_cast<float *>(um->user_meta_data);
                         foot_u = uv[0];
@@ -295,9 +419,35 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
                 }
             }
 
+            // ReID-feature blacklist: if this track's embedding is close to any
+            // banked feature, treat it as inactive forever (covers re-entry under
+            // a fresh tracker id). Promote the hit to inactive_ids_ so the next
+            // frame short-circuits without recomputing dot products.
+            std::vector<float> reid_norm = l2_normalize_copy(reid_feature, reid_size);
+            if (!reid_norm.empty()) {
+                bool reid_match = false;
+                float best_sim = -1.0f;
+                {
+                    std::lock_guard<std::mutex> lk(inactive_mu_);
+                    for (const auto &banned : banned_features_) {
+                        float s = dot(banned, reid_norm);
+                        if (s > best_sim) best_sim = s;
+                        if (s >= reid_sim_threshold_) { reid_match = true; break; }
+                    }
+                    if (reid_match) inactive_ids_.insert(packed_id);
+                }
+                if (reid_match) {
+                    std::printf("  obj id=%" PRIu64 " ReID match (sim=%.3f >= %.3f) -> SUPPRESS\n",
+                                obj->object_id, best_sim, reid_sim_threshold_);
+                    nvds_remove_obj_meta_from_frame(frame_meta, obj);
+                    continue;
+                }
+            }
+
             auto gp = geo_->pixel_to_gps(foot_u, foot_v);
 
-            bool inserted = false;
+            bool inserted     = false;
+            bool target_active = false;
             {
                 std::lock_guard<std::mutex> lk(targets_mu_);
                 auto _tgt = std::make_shared<Target>(obj->class_id, obj->object_id);
@@ -311,24 +461,36 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
                 it->second->bbox_top    = bb.top;
                 it->second->bbox_width  = bb.width;
                 it->second->bbox_height = bb.height;
-                it->second->last_seen = now_unix_seconds();
-                it->second->dirty     = true;
+                it->second->last_seen   = now_unix_seconds();
+                it->second->dirty       = true;
+                if (!reid_norm.empty()) it->second->reid_feature = reid_norm;
+                target_active = it->second->active_ack;
             }
 
-            std::printf("  obj id=%" PRIu64 " class=%s(%d) det=%.2f trk=%.2f bbox=(%.0f,%.0f %.0fx%.0f)%s\n",
-                        obj->object_id, obj->obj_label, obj->class_id,
-                        obj->confidence, obj->tracker_confidence,
-                        bb.left, bb.top, bb.width, bb.height,
-                        inserted ? " [new]" : "");
+            // Colour the bbox: blue while UNKNOWN, red once acknowledged ACTIVE.
+            // INACTIVE never reaches here — already removed from the frame above.
+            auto &rp = obj->rect_params;
+            rp.border_color.red   = target_active ? 1.0f : 0.0f;
+            rp.border_color.green = 0.0f;
+            rp.border_color.blue  = target_active ? 0.0f : 1.0f;
+            rp.border_color.alpha = 1.0f;
+            rp.border_width       = 3;
 
-            if (gp) std::printf("    geo=(%.7f,%.7f) range=%.1fm foot_uv=(%.1f,%.1f)\n",
-                                gp->latitude, gp->longitude, gp->range_m, foot_u, foot_v);
-            if (world_xyz)  std::printf("    world_foot=(%.2f,%.2f,%.2f)\n", world_xyz[0], world_xyz[1], world_xyz[2]);
-            if (visibility) std::printf("    visibility=%.2f\n", *visibility);
-            if (reid_size)  std::printf("    reid=%uf\n", reid_size);
+            if (verbose_frames_) {
+                std::printf("  obj id=%" PRIu64 " class=%s(%d) det=%.2f trk=%.2f bbox=(%.0f,%.0f %.0fx%.0f)%s\n",
+                            obj->object_id, obj->obj_label, obj->class_id,
+                            obj->confidence, obj->tracker_confidence,
+                            bb.left, bb.top, bb.width, bb.height,
+                            inserted ? " [new]" : "");
+                if (gp) std::printf("    geo=(%.7f,%.7f) range=%.1fm foot_uv=(%.1f,%.1f)\n",
+                                    gp->latitude, gp->longitude, gp->range_m, foot_u, foot_v);
+                if (world_xyz)  std::printf("    world_foot=(%.2f,%.2f,%.2f)\n", world_xyz[0], world_xyz[1], world_xyz[2]);
+                if (visibility) std::printf("    visibility=%.2f\n", *visibility);
+                if (reid_size)  std::printf("    reid=%uf\n", reid_size);
+            }
         }
     }
-    std::fflush(stdout);
+    if (verbose_frames_) std::fflush(stdout);
 }
 
 namespace {
