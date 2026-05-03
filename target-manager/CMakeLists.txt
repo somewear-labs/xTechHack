@@ -33,7 +33,11 @@ foreach(proto ${PROTO_FILES})
     set(gen_h  "${PROTO_GEN_DIR}/${proto_name}.pb.h")
     add_custom_command(
         OUTPUT  "${gen_cc}" "${gen_h}"
-        COMMAND "${PROTOC}" --cpp_out=${PROTO_GEN_DIR} -I${PROTO_DIR} "${proto}"
+        # --experimental_allow_proto3_optional needed because apt-shipped protoc
+        # (3.12) treats proto3 `optional` as experimental, but we use it in
+        # TargetResponseDelta.state for explicit "field unchanged" semantics.
+        COMMAND "${PROTOC}" --experimental_allow_proto3_optional
+                --cpp_out=${PROTO_GEN_DIR} -I${PROTO_DIR} "${proto}"
         DEPENDS "${proto}"
         COMMENT "protoc ${proto_name}.proto"
         VERBATIM

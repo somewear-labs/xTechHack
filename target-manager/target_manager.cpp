@@ -71,6 +71,8 @@ const char *state_name(int s) {
         case 0: return "UNKNOWN";
         case 1: return "ACTIVE";
         case 2: return "INACTIVE";
+        case 3: return "ACQUIRED";
+        case 4: return "LOST";
         case 5: return "NEUTRALIZED";
         default: return "STATE?";
     }
@@ -227,9 +229,11 @@ void TargetManager::inbound_loop() {
         const std::uint64_t id = u.id();
         switch (u.state()) {
             case TARGET_STATE_ACTIVE:
+            case TARGET_STATE_ACQUIRED:
+            case TARGET_STATE_LOST:
             case TARGET_STATE_NEUTRALIZED: {
                 int new_state = static_cast<int>(u.state());
-                const char *name = (u.state() == TARGET_STATE_ACTIVE) ? "ACTIVE" : "NEUTRALIZED";
+                const char *name = state_name(new_state);
                 bool found = false;
                 {
                     std::lock_guard<std::mutex> lk(targets_mu_);
@@ -309,10 +313,17 @@ void TargetManager::flush_once() {
         std::lock_guard<std::mutex> lk(targets_mu_);
         snapshot.reserve(targets_.size());
         for (auto &kv : targets_) {
-            if (kv.second && kv.second->dirty) {
-                snapshot.push_back(*kv.second);
-                kv.second->dirty = false;
+            if (!kv.second || !kv.second->dirty) continue;
+            // Skip targets whose pixel→GPS projection has never succeeded —
+            // their lat/lon would be the default (0,0) which (a) plots at the
+            // equator on any consumer's map and (b) wrecks the spatial-delta
+            // base picker by giving us a "lowest id" target with zero geo.
+            if (kv.second->latitude == 0.0 && kv.second->longitude == 0.0) {
+                kv.second->dirty = false;   // still consume the dirty bit
+                continue;
             }
+            snapshot.push_back(*kv.second);
+            kv.second->dirty = false;
         }
     }
     if (snapshot.empty()) return;
@@ -391,10 +402,12 @@ void TargetManager::post_batch(const std::vector<Target> &chunk) {
         const std::int32_t this_lon_i32 = static_cast<std::int32_t>(t.longitude * 1e7);
 
         // Location delta — only emit if any component differs from base.
+        // Note: apt protoc 3.12 keeps camelCase fields literal-lowercase, so
+        // accessors are set_longitudedelta / set_latitudedelta (no underscore).
         if (this_lat_i32 != base_lat_i32 || this_lon_i32 != base_lon_i32) {
             auto *dloc = d->mutable_location_delta();
-            dloc->set_longitude_delta(this_lon_i32 - base_lon_i32);
-            dloc->set_latitude_delta (this_lat_i32 - base_lat_i32);
+            dloc->set_longitudedelta(this_lon_i32 - base_lon_i32);
+            dloc->set_latitudedelta (this_lat_i32 - base_lat_i32);
         }
 
         // State only when it differs from base.
@@ -496,10 +509,11 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
             auto *obj      = static_cast<NvDsObjectMeta *>(lo->data);
             const auto &bb = obj->tracker_bbox_info.org_bbox_coords;
 
-            // Mirrors the Target ctor packing in target_manager.hpp.
+            // Mirrors the Target ctor packing in target_manager.hpp:
+            // upper byte = class_id+1, lower byte = object_id mod 256.
             const std::uint64_t packed_id =
-                ((static_cast<std::uint64_t>(obj->class_id) & 0xFFull) << 8) |
-                 (static_cast<std::uint64_t>(obj->object_id) & 0xFFull);
+                (((static_cast<std::uint64_t>(obj->class_id) + 1) & 0xFFull) << 8) |
+                  (static_cast<std::uint64_t>(obj->object_id)     & 0xFFull);
             {
                 std::lock_guard<std::mutex> lk(inactive_mu_);
                 if (inactive_ids_.count(packed_id)) {
@@ -574,30 +588,101 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
 
             auto gp = geo_->pixel_to_gps(foot_u, foot_v);
 
-            bool inserted = false;
+            // Threshold below which a lat/lon update is considered "no real
+            // motion." 1e-5 deg ≈ 1 m at our latitudes. Keeps stationary
+            // targets out of every 10s flush.
+            constexpr double GEO_MOVE_THRESHOLD_DEG = 1e-5;
+
+            bool inserted     = false;
+            bool moved        = false;
+            bool geo_now_set  = false;   // gp succeeded this frame
             {
                 std::lock_guard<std::mutex> lk(targets_mu_);
                 auto _tgt = std::make_shared<Target>(obj->class_id, obj->object_id);
                 auto [it, ins] = targets_.try_emplace(_tgt->id, _tgt);
                 inserted = ins;
                 if (gp) {
-                    it->second->latitude  = gp->latitude;
-                    it->second->longitude = gp->longitude;
+                    geo_now_set = true;
+                    const double new_lat = gp->latitude;
+                    const double new_lon = gp->longitude;
+                    const bool first_real_geo =
+                        it->second->latitude == 0.0 && it->second->longitude == 0.0;
+                    moved = first_real_geo
+                         || std::abs(new_lat - it->second->latitude) > GEO_MOVE_THRESHOLD_DEG
+                         || std::abs(new_lon - it->second->longitude) > GEO_MOVE_THRESHOLD_DEG;
+                    it->second->latitude  = new_lat;
+                    it->second->longitude = new_lon;
                 }
                 it->second->bbox_left   = bb.left;
                 it->second->bbox_top    = bb.top;
                 it->second->bbox_width  = bb.width;
                 it->second->bbox_height = bb.height;
                 it->second->last_seen   = now_unix_seconds();
-                it->second->dirty       = true;
+                // Only flag dirty when the target actually moved (or this
+                // is its first detection). State transitions from the inbound
+                // path set dirty independently, so they still surface.
+                if (moved) it->second->dirty = true;
                 if (!reid_norm.empty()) it->second->reid_feature = reid_norm;
             }
             if (inserted) {
-                std::printf("[tm] new id=%" PRIu64 " class=%d first_seen\n",
-                            packed_id, obj->class_id);
+                std::printf("[tm] new id=%" PRIu64 " class=%d first_seen%s\n",
+                            packed_id, obj->class_id,
+                            geo_now_set ? "" : " [geo fail — foot above horizon]");
+            } else if (!geo_now_set) {
+                // Persistent geo failure on a known target — log once per
+                // batch, not per frame, to keep noise down.
+                static thread_local std::uint64_t last_geo_fail_id = 0;
+                if (last_geo_fail_id != packed_id) {
+                    std::printf("[tm] geo fail id=%" PRIu64 " foot=(%.0f,%.0f)\n",
+                                packed_id, foot_u, foot_v);
+                    last_geo_fail_id = packed_id;
+                }
             }
-            // Bbox colour is set later in apply_colors (post-process_meta hook).
-            // Writing it here would be clobbered by stock process_meta.
+            // Redundant color write here in on_batch — apply_colors (the
+            // post-process_meta hook) is supposed to be authoritative, but
+            // we've observed it not always firing. Writing in both places
+            // means whichever runs last wins, and the visible bbox gets
+            // colored. Reads state from targets_ under the lock we just
+            // released; race is benign (worst case: one frame paints stale).
+            int t_state = 0;
+            {
+                std::lock_guard<std::mutex> lk(targets_mu_);
+                auto it = targets_.find(packed_id);
+                if (it != targets_.end() && it->second) t_state = it->second->state;
+            }
+            {
+                // Hex from client/public/app.js — must stay in sync with web UI.
+                // UNKNOWN  #5F666C gray (default)
+                // ACTIVE   #226FEE blue
+                // ACQUIRED #1EB982 green
+                // LOST     #F8C100 yellow
+                // NEUTRALIZED #E4591D orange (flashing for visibility)
+                double r = 0.373, g = 0.400, b = 0.424, a = 1.0;   // UNKNOWN gray
+                unsigned int width = 3;
+                switch (t_state) {
+                    case 1: r = 0.133; g = 0.435; b = 0.933; width = 6; break;  // ACTIVE
+                    case 3: r = 0.118; g = 0.725; b = 0.510; width = 6; break;  // ACQUIRED
+                    case 4: r = 0.973; g = 0.757; b = 0.000; width = 6; break;  // LOST
+                    case 5: {                                                    // NEUTRALIZED — flash
+                        using namespace std::chrono;
+                        auto ms = duration_cast<milliseconds>(
+                            steady_clock::now().time_since_epoch()).count();
+                        bool on = ((ms / 250) % 2) == 0;
+                        r = 0.894; g = 0.349; b = 0.114;
+                        a = on ? 1.0 : 0.25;
+                        width = 6;
+                        break;
+                    }
+                    default: break;
+                }
+                auto &rp = obj->rect_params;
+                rp.border_color.red   = r;
+                rp.border_color.green = g;
+                rp.border_color.blue  = b;
+                rp.border_color.alpha = a;
+                rp.border_width       = width;
+                rp.has_color_info     = 1;   // tell OSD to honor our color
+            }
 
 
             if (verbose_frames_) {
@@ -624,9 +709,11 @@ void TargetManager::apply_colors(NvDsBatchMeta *batch_meta) {
         auto *frame_meta = static_cast<NvDsFrameMeta *>(lf->data);
         for (NvDsMetaList *lo = frame_meta->obj_meta_list; lo; lo = lo->next) {
             auto *obj = static_cast<NvDsObjectMeta *>(lo->data);
+            // MUST match the +1 packing used in on_batch / Target ctor.
+            // Earlier this was missing the +1 → lookup miss → never painted.
             const std::uint64_t packed_id =
-                ((static_cast<std::uint64_t>(obj->class_id)  & 0xFFull) << 8) |
-                 (static_cast<std::uint64_t>(obj->object_id) & 0xFFull);
+                (((static_cast<std::uint64_t>(obj->class_id) + 1) & 0xFFull) << 8) |
+                  (static_cast<std::uint64_t>(obj->object_id)     & 0xFFull);
 
             int  state         = 0;   // UNKNOWN default
             bool state_changed = false;
@@ -642,23 +729,31 @@ void TargetManager::apply_colors(NvDsBatchMeta *batch_meta) {
                 }
             }
 
-            // Color/width per state. INACTIVE never reaches here — already
-            // removed from the frame upstream in on_batch.
-            double r = 0.0, g = 0.0, b = 1.0, a = 1.0;   // default UNKNOWN = blue
+            // Color/width per state — hex from client/public/app.js, must
+            // stay in sync with web UI. INACTIVE never reaches here (removed
+            // from frame upstream in on_batch).
+            //   UNKNOWN     #5F666C  gray   (default)
+            //   ACTIVE      #226FEE  blue
+            //   ACQUIRED    #1EB982  green
+            //   LOST        #F8C100  yellow
+            //   NEUTRALIZED #E4591D  orange (flashing for visibility)
+            double r = 0.373, g = 0.400, b = 0.424, a = 1.0;   // UNKNOWN gray
             unsigned int width = 3;
             switch (state) {
-                case 1:  r = 1.0; g = 0.0; b = 0.0; width = 6; break;  // ACTIVE = red
-                case 5: {  // NEUTRALIZED — flash green at ~2 Hz so it pops
+                case 1: r = 0.133; g = 0.435; b = 0.933; width = 6; break;  // ACTIVE
+                case 3: r = 0.118; g = 0.725; b = 0.510; width = 6; break;  // ACQUIRED
+                case 4: r = 0.973; g = 0.757; b = 0.000; width = 6; break;  // LOST
+                case 5: {                                                    // NEUTRALIZED — flash
                     using namespace std::chrono;
                     auto ms = duration_cast<milliseconds>(
                         steady_clock::now().time_since_epoch()).count();
                     bool on = ((ms / 250) % 2) == 0;
-                    r = 0.0; g = 1.0; b = 0.0;
-                    a = on ? 1.0 : 0.2;
+                    r = 0.894; g = 0.349; b = 0.114;
+                    a = on ? 1.0 : 0.25;
                     width = 6;
                     break;
                 }
-                default: break;                                         // UNKNOWN/ACQUIRED/LOST = blue
+                default: break;
             }
 
             auto &rp = obj->rect_params;
@@ -667,7 +762,7 @@ void TargetManager::apply_colors(NvDsBatchMeta *batch_meta) {
             rp.border_color.blue  = b;
             rp.border_color.alpha = a;
             rp.border_width       = width;
-            rp.has_color_info     = 0;
+            rp.has_color_info     = 1;   // tell nvosd to use our color
 
             if (state_changed) {
                 std::printf("[tm-color] id=%" PRIu64 " -> %s (rgba=%.1f,%.1f,%.1f,%.1f w=%u)\n",

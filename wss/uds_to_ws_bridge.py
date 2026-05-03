@@ -90,11 +90,11 @@ class _UdsProto(asyncio.DatagramProtocol):
 
 
 def _slim(data: dict) -> dict:
-    """Trim a deepstream datagram to the minimum the browser overlay needs.
-
-    Keep top-level frame identification (frame, pts_ns, ts_us, src) and per-
-    target id + bbox. Everything else (label, conf, foot_px, class_id) gets
-    dropped. class_id is recoverable from id's high bits if needed.
+    """Trim a deepstream datagram to the minimum the browser overlay needs:
+    `pts_ns` (the sync key for `requestVideoFrameCallback`) and per-target
+    `id` + `bbox`. Everything else — frame number, ts_us, src, class_id,
+    label, conf, foot_px — is dropped. class_id is still recoverable from
+    id's high bits if a consumer needs it.
     """
     out_targets = []
     for t in data.get("targets", []) or []:
@@ -106,9 +106,8 @@ def _slim(data: dict) -> dict:
         if slim:
             out_targets.append(slim)
     out = {"targets": out_targets}
-    for k in ("frame", "pts_ns", "ts_us", "src"):
-        if k in data:
-            out[k] = data[k]
+    if "pts_ns" in data:
+        out["pts_ns"] = data["pts_ns"]
     return out
 
 

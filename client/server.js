@@ -42,9 +42,20 @@ function startFfmpeg() {
 
   console.log(`[rtsp] Starting ffmpeg for ${RTSP_URL}`);
   ffmpeg = spawn('ffmpeg', [
+    // === input options (mpv-equivalent flags via libavformat) ===
+    // mpv --rtsp-transport=tcp
     '-rtsp_transport', 'tcp',
-    '-timeout', '5000000',
+    // mpv --demuxer-lavf-o=stimeout=5000000   (socket I/O timeout in μs; 5s)
+    '-stimeout', '5000000',
+    // mpv --demuxer-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_delay_max=2
+    '-reconnect', '1',
+    '-reconnect_streamed', '1',
+    '-reconnect_delay_max', '2',
+    // Small input thread queue — matches mpv --cache-secs=2 spirit (don't buffer
+    // a huge backlog when source is briefly slow; keep latency low).
+    '-thread_queue_size', '64',
     '-i', RTSP_URL,
+    // === output: MPEG-1 over MPEG-TS to the WS relay (unchanged) ===
     '-f', 'mpegts',
     '-codec:v', 'mpeg1video',
     '-b:v', '1000k',

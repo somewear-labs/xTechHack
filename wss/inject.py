@@ -35,8 +35,9 @@ STATES = {
 
 def pack_id(class_id: int, object_id: int) -> int:
     # Matches target_manager.hpp Target ctor: 16-bit packed id where the
-    # upper byte is class_id and the lower byte is object_id mod 256.
-    return ((class_id & 0xFF) << 8) | (object_id & 0xFF)
+    # upper byte is (class_id + 1) and the lower byte is object_id mod 256.
+    # The +1 keeps id != 0 so it doesn't get omitted by proto3 defaults.
+    return (((class_id + 1) & 0xFF) << 8) | (object_id & 0xFF)
 
 
 def main() -> int:
