@@ -408,7 +408,11 @@ function connectWebSocket() {
 }
 
 function normalizeTarget(t) {
-  return (t && t.id != null) ? { ...t, id: String(t.id) } : t;
+  if (!t || t.id == null) return t;
+  t = { ...t, id: String(t.id) };
+  const decoded = decodeProtoId(t.id);
+  if (decoded) targetLabels.set(t.id, decoded);
+  return t;
 }
 
 function handleMessage(msg) {
@@ -575,24 +579,16 @@ function renderList() {
     const lng = ((loc.longitude || 0) / 1e7).toFixed(4);
     const lat = ((loc.latitude  || 0) / 1e7).toFixed(4);
     const idStr = t.id != null ? String(t.id) : '';
-    const displayName = t.label || (idStr ? idStr.split('-')[0].toUpperCase() : '???');
-    const shortId = idStr ? idStr.split('-')[0].toUpperCase() : '';
     const updSecs = (t.updated_date || {}).seconds || 0;
     const updated = updSecs ? new Date(updSecs * 1000).toLocaleTimeString() : '';
     const sel = t.id === selectedId ? ' selected' : '';
     const dropOpen = activeDropdownId === t.id ? ' open' : '';
     const imgUrl = targetImages.get(t.id);
-    const decoded = targetLabels.get(t.id);
-    const classTag = decoded ? `<span class="target-class-tag">${decoded.label}</span>` : '';
     const thumbHtml = imgUrl
-      ? `<div class="target-thumb-wrap"><img class="target-thumb" src="${imgUrl}" alt="">${classTag}</div>`
+      ? `<div class="target-thumb-wrap"><img class="target-thumb" src="${imgUrl}" alt=""></div>`
       : '';
-    const cardName = decoded
-      ? decoded.label.toUpperCase()
-      : (t.label || (idStr ? idStr.split('-')[0].toUpperCase() : '???'));
-    const cardSubId = decoded
-      ? `#${decoded.objectId}`
-      : (t.label ? 'id: ' + shortId : '');
+    const cardName = t.label || (idStr ? idStr.split('-')[0].toUpperCase() : '???');
+    const cardSubId = t.label ? 'id: ' + idStr : '';
     return `
       <div class="target-card${sel}" data-id="${t.id}">
         ${thumbHtml}
@@ -1087,49 +1083,38 @@ function cropBboxFromCanvas(srcCanvas, bx, by, bw, bh) {
   try { return off.toDataURL('image/jpeg', 0.82); } catch { return null; }
 }
 
-// Decode proto target id: ((class_id + 1) << 32) | object_id
+// Decode proto target id: (category << 8) | track_number, both 8-bit lanes.
 function decodeProtoId(id) {
   const n = Number(id);
-  if (!Number.isFinite(n) || n < 0x100000000) return null;
-  const classId = Math.floor(n / 0x100000000) - 1;
-  const objectId = Math.round(n % 0x100000000);
+  if (!Number.isFinite(n) || n < 0) return null;
+  const classId  = (n >> 8) & 0xFF;
+  const objectId = n & 0xFF;
   const label = COCO_CLASSES[classId] ?? `class_${classId}`;
   return { classId, objectId, label };
 }
 
-// Match a frame_detection bbox [x,y,w,h] to the closest proto target by bbox center distance.
-function matchDetectionToTarget(bbox) {
-  const cx = bbox[0] + bbox[2] / 2;
-  const cy = bbox[1] + bbox[3] / 2;
-  let bestId = null, bestDist = Infinity;
-  for (const t of repo.list()) {
-    if (!t.bbox_left && !t.bbox_top) continue;
-    const tx = (t.bbox_left || 0) + (t.bbox_width  || 0) / 2;
-    const ty = (t.bbox_top  || 0) + (t.bbox_height || 0) / 2;
-    const dist = Math.hypot(cx - tx, cy - ty);
-    if (dist < bestDist) { bestDist = dist; bestId = t.id; }
-  }
-  return bestDist < 200 ? bestId : null;
-}
 
 function handleFrameDetection(data) {
   if (!data) return;
   console.log('frame_detection', data);
-  const frame = findFrame(data.pts_ns);
-  if (!frame) return;
+  // Look up by ts_us (deepstream wall-clock µs) which shares the same epoch
+  // as the Date.now()*1000 timestamps stored by captureFrame.
+  const frame = findFrame(data.ts_us);
+  if (!frame) {
+    console.error('handleFrameDetection: frame buffer is empty, cannot crop thumbnail (ts_us=' + data.ts_us + ')');
+    return;
+  }
 
   let updated = false;
   for (const det of (data.targets || [])) {
     const [bx, by, bw, bh] = det.bbox;
     const img = cropBboxFromCanvas(frame.snap, bx, by, bw, bh);
     if (!img) continue;
-    const targetId = matchDetectionToTarget(det.bbox);
-    if (targetId) {
-      targetImages.set(targetId, img);
-      const decoded = decodeProtoId(targetId);
-      if (decoded) targetLabels.set(targetId, decoded);
-      updated = true;
-    }
+    const targetId = String(det.id);
+    targetImages.set(targetId, img);
+    const decoded = decodeProtoId(targetId);
+    if (decoded) targetLabels.set(targetId, decoded);
+    updated = true;
   }
   if (updated) renderList();
 }
@@ -1166,7 +1151,7 @@ function handleFrameDetection(data) {
     reconnectInterval: 5,
     onSourceEstablished: () => setPipStatus('live'),
     onSourceCompleted:   () => setPipStatus('connecting'),
-    onVideoDecode: (_decoder, time) => captureFrame(Math.round(time * 1e9)),
+    onVideoDecode: () => captureFrame(Date.now() * 1000),
   });
 
   toggleBtn.addEventListener('click', () => {

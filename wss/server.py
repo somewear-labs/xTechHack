@@ -577,7 +577,20 @@ async def handle_beam_event(ws: WebSocketServerProtocol, payload: Any) -> str:
                 if decoded_targets:
                     for target in decoded_targets:
                         target_id = target["id"]
-                        is_new = target_id not in targets
+                        existing = targets.get(target_id)
+                        if existing:
+                            current_state = existing.get("state", "TARGET_STATE_UNKNOWN")
+                            new_state = target.get("state", "TARGET_STATE_UNKNOWN")
+                            if _is_valid_transition and not _is_valid_transition(current_state, new_state):
+                                log.info("beam_event: state machine blocked %s → %s for target %s (detection stream)", current_state, new_state, target_id)
+                                # Still update location if non-zero, but preserve state
+                                loc = target.get("tracking_location") or {}
+                                if loc.get("longitude", 0) != 0 or loc.get("latitude", 0) != 0:
+                                    existing["tracking_location"] = loc
+                                    existing["updated_date"] = now_timestamp()
+                                    await broadcast("target_updated", existing, exclude=ws)
+                                continue
+                        is_new = existing is None
                         target["updated_date"] = now_timestamp()
                         target["label"] = identity_name
                         target["beam_identity_id"] = identity_id
@@ -644,7 +657,9 @@ async def handler(ws: WebSocketServerProtocol) -> None:
             payload = msg.get("payload")
 
             if action == "publish" and (payload or {}).get("event") == "frame_detection":
-                log.debug("recv << frame_detection (suppressed)")
+                det_data = (payload or {}).get("data") or {}
+                log.info("recv << frame_detection pts_ns=%s n_targets=%d",
+                         det_data.get("pts_ns"), len(det_data.get("targets") or []))
             else:
                 log.info("recv << %s", raw)
 

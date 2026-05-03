@@ -19,20 +19,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from target_proto_pb2 import (  # noqa: E402
     TargetUpdate,
-    TARGET_STATE_ACTIVE,
-    TARGET_STATE_INACTIVE,
-    TARGET_STATE_ACQUIRED,
-    TARGET_STATE_LOST,
-    TARGET_STATE_NEUTRALIZED,
     TARGET_STATE_UNKNOWN,
+    TARGET_STATE_CONFIRMED,
+    TARGET_STATE_NEUTRALIZED,
+    TARGET_STATE_INACTIVE,
 )
 
 STATES = {
     "unknown":     TARGET_STATE_UNKNOWN,
-    "active":      TARGET_STATE_ACTIVE,
+    "confirmed":   TARGET_STATE_CONFIRMED,
     "inactive":    TARGET_STATE_INACTIVE,
-    "acquired":    TARGET_STATE_ACQUIRED,
-    "lost":        TARGET_STATE_LOST,
     "neutralized": TARGET_STATE_NEUTRALIZED,
 }
 

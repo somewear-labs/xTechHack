@@ -2,7 +2,6 @@
 
 import base64
 import time
-import uuid
 
 from target_proto_pb2 import (
     TARGET_STATE_UNKNOWN,
@@ -55,7 +54,7 @@ def target_dict_to_bytestring(target: dict, workspace_id: int = 0) -> bytes:
         target_id = 0
 
     proto = TargetResponse(
-        id=int(target.get("id", 0)),
+        id=target_id,
         updated_date=Timestamp(
             seconds=upd.get("seconds", int(time.time())),
             nanos=upd.get("nanos", 0),
@@ -89,9 +88,6 @@ def _target_response_to_dict(proto: TargetResponse) -> dict:
         "state":        _ENUM_TO_STATE.get(proto.state, "TARGET_STATE_UNKNOWN"),
         "workspace_id": proto.workspace_id,
     }
-    if proto.bbox:
-        result.update(_unpack_bbox(proto.bbox))
-    return result
 
 
 def bytestring_to_target_dict(data: bytes) -> dict:

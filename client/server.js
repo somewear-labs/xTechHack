@@ -43,6 +43,7 @@ function startFfmpeg() {
   console.log(`[rtsp] Starting ffmpeg for ${RTSP_URL}`);
   ffmpeg = spawn('ffmpeg', [
     '-rtsp_transport', 'tcp',
+    '-timeout', '5000000',
     '-i', RTSP_URL,
     '-f', 'mpegts',
     '-codec:v', 'mpeg1video',
@@ -54,7 +55,6 @@ function startFfmpeg() {
   ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
   ffmpeg.stderr.on('data', (d) => {
-    // ffmpeg writes progress to stderr; suppress unless debugging
     if (process.env.RTSP_DEBUG) process.stderr.write(d);
   });
 
@@ -69,7 +69,6 @@ function startFfmpeg() {
   ffmpeg.on('close', (code) => {
     console.log(`[rtsp] ffmpeg exited (${code})`);
     ffmpeg = null;
-    // Restart if there are still connected clients
     if (clientCount > 0) {
       console.log('[rtsp] Restarting ffmpeg in 2s...');
       setTimeout(startFfmpeg, 2000);

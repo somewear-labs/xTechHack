@@ -211,8 +211,7 @@ html, body {
 
 .target-thumb {
   width: 72px;
-  height: 128px;
-  object-fit: cover;
+  height: auto;
   display: block;
   border: 1px solid rgba(34, 111, 238, 0.35);
   border-bottom: none;
@@ -221,7 +220,7 @@ html, body {
 
 .target-class-tag {
   display: block;
-  width: 72px;
+  width: 100%;
   box-sizing: border-box;
   text-align: center;
   font-size: 9px;
