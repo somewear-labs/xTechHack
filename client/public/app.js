@@ -424,7 +424,7 @@ function handleMessage(msg) {
 function stateBadgeHtml(state) {
   const meta = STATE_META[state] || STATE_META.TARGET_STATE_UNKNOWN;
   return `<span class="state-badge" style="color:${meta.color};background:${meta.bg};border-color:${meta.color}44">
-    <span class="state-icon">${meta.icon}</span>${meta.short}
+    <span class="state-icon">${meta.icon}</span>${meta.label}
   </span>`;
 }
 
@@ -727,7 +727,7 @@ function renderMapOverlay(t) {
     if (!allowed) return '';
     return `<button class="ol-state-btn${active ? ' active' : ''}" data-state="${key}" data-id="${t.id}"
       style="color:${m.color}${active ? `;border-color:${m.color};background:${m.bg}` : ''}">
-      <span>${m.icon}</span><span>${m.short}</span>
+      <span>${m.icon}</span><span>${m.label}</span>
     </button>`;
   }).join('');
 

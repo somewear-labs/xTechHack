@@ -10,10 +10,10 @@
   --tertiary-accent: #1EB982;
   --secondary-accent: #F8C100;
   --error: #E4591D;
-  --surface: #1A1D20;
-  --surface-elevated: #212528;
-  --surface-card: #2A2D31;
-  --surface-separator: #333740;
+  --surface: rgba(10, 12, 15, 0.82);
+  --surface-elevated: rgba(20, 23, 27, 0.85);
+  --surface-card: rgba(30, 34, 38, 0.88);
+  --surface-separator: rgba(55, 62, 70, 0.9);
   --primary-on-surface: #FFFFFF;
   --secondary-on-surface: rgba(255,255,255,0.7);
   --tertiary-on-surface: rgba(255,255,255,0.4);
@@ -135,8 +135,8 @@ html, body {
   color: var(--tertiary-on-surface);
   border: none;
   border-bottom: 2px solid transparent;
-  padding: 9px 0;
-  font-size: 10px;
+  padding: 12px 0;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 1.5px;
   cursor: pointer;
@@ -169,8 +169,8 @@ html, body {
   color: var(--secondary-on-surface);
   border: 1px solid var(--surface-separator);
   border-radius: 4px;
-  padding: 4px 10px;
-  font-size: 9px;
+  padding: 7px 14px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 1px;
   cursor: pointer;
@@ -186,13 +186,13 @@ html, body {
 /* ── Target cards ────────────────────────────── */
 
 .target-card {
-  padding: 10px 12px 10px 16px;
+  padding: 14px 14px 14px 18px;
   border-bottom: 1px solid var(--surface-separator);
   cursor: pointer;
   transition: background 0.15s;
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: 12px;
 }
 
 .target-thumb {
@@ -228,7 +228,7 @@ html, body {
 }
 
 .target-id {
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--primary-on-surface);
   letter-spacing: 0.5px;
@@ -240,7 +240,7 @@ html, body {
 }
 
 .target-short-id {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 400;
   color: var(--tertiary-on-surface);
   letter-spacing: 0;
@@ -248,7 +248,7 @@ html, body {
 }
 
 .target-coords {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--tertiary-on-surface);
   font-variant-numeric: tabular-nums;
   flex: 1;
@@ -256,7 +256,7 @@ html, body {
 }
 
 .target-updated {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--tertiary-on-surface);
   white-space: nowrap;
   flex-shrink: 0;
@@ -267,11 +267,11 @@ html, body {
 .state-badge {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 10px;
+  gap: 6px;
+  padding: 6px 12px;
   border-radius: 4px;
   border: 1px solid transparent;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.5px;
   white-space: nowrap;
@@ -279,7 +279,7 @@ html, body {
 }
 
 .state-icon {
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1;
 }
 
@@ -343,8 +343,8 @@ html, body {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 16px;
-  font-size: 12px;
+  padding: 14px 18px;
+  font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.5px;
   color: var(--item-color, var(--secondary-on-surface));
@@ -502,8 +502,8 @@ html, body {
   color: var(--secondary-on-surface);
   border: 1px solid var(--surface-separator);
   border-radius: 4px;
-  padding: 6px 10px;
-  font-size: 10px;
+  padding: 8px 14px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 1px;
   cursor: pointer;
@@ -533,8 +533,8 @@ html, body {
   color: var(--secondary-on-surface);
   border: 1px solid var(--surface-separator);
   border-radius: 4px;
-  padding: 6px 14px;
-  font-size: 10px;
+  padding: 9px 18px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 1px;
   cursor: pointer;
@@ -557,15 +557,15 @@ html, body {
 
 #out-sim-btn {
   position: absolute;
-  bottom: 58px;
+  bottom: 64px;
   right: 12px;
   z-index: 5;
   background: var(--surface-elevated);
   color: var(--secondary-on-surface);
   border: 1px solid var(--surface-separator);
   border-radius: 4px;
-  padding: 6px 14px;
-  font-size: 10px;
+  padding: 9px 18px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 1px;
   cursor: pointer;
@@ -718,21 +718,21 @@ html, body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 3px;
-  padding: 7px 4px;
+  gap: 4px;
+  padding: 10px 6px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 2px;
   cursor: pointer;
   font-family: var(--font);
   transition: background 0.12s;
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.5px;
 }
 
 .ol-state-btn span:first-child {
-  font-size: 14px;
+  font-size: 16px;
   line-height: 1;
 }
 
