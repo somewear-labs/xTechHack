@@ -186,10 +186,23 @@ html, body {
 /* ── Target cards ────────────────────────────── */
 
 .target-card {
-  padding: 10px 16px;
+  padding: 10px 12px 10px 16px;
   border-bottom: 1px solid var(--surface-separator);
   cursor: pointer;
   transition: background 0.15s;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.target-thumb {
+  width: 36px;
+  height: 64px;
+  object-fit: cover;
+  flex-shrink: 0;
+  display: block;
+  border: 1px solid rgba(34, 111, 238, 0.35);
+  background: #000;
 }
 
 .target-card:hover {

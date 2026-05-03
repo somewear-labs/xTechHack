@@ -49,6 +49,8 @@ let unreadMessages = 0;
 let selectedId = null;
 let currentStyle = 'satellite';
 let overlayState = null; // { id, lng, lat, color }
+const targetImages = new Map(); // id → cropped-frame dataURL
+let rtmsCanvas = null;
 let map;
 let ws;
 let reconnectTimeout;
@@ -340,9 +342,11 @@ function handleMessage(msg) {
     if (!repo.upsert(t)) return;
     const loc = t.tracking_location || {};
     setDisplayPosition(t.id, (loc.longitude || 0) / 1e7, (loc.latitude || 0) / 1e7);
+    const img = cropBboxFromRtms(t);
+    if (img) targetImages.set(t.id, img);
     rebuildSource();
     renderList();
-    if (selectedId === t.id) renderPopup(t);
+    if (selectedId === t.id) renderMapOverlay(t);
     return;
   }
 
@@ -351,8 +355,10 @@ function handleMessage(msg) {
     if (!repo.upsert(t)) return;
     const loc = t.tracking_location || {};
     animateToPosition(t.id, (loc.longitude || 0) / 1e7, (loc.latitude || 0) / 1e7);
+    const img = cropBboxFromRtms(t);
+    if (img) targetImages.set(t.id, img);
     renderList();
-    if (selectedId === t.id) renderPopup(t);
+    if (selectedId === t.id) renderMapOverlay(t);
     return;
   }
 
@@ -361,6 +367,7 @@ function handleMessage(msg) {
     repo.delete(id);
     displayPositions.delete(id);
     activeAnimations.delete(id);
+    targetImages.delete(id);
     if (selectedId === id) {
       overlayState = null;
       selectedId = null;
@@ -470,8 +477,11 @@ function renderList() {
     const updated = updSecs ? new Date(updSecs * 1000).toLocaleTimeString() : '';
     const sel = t.id === selectedId ? ' selected' : '';
     const dropOpen = activeDropdownId === t.id ? ' open' : '';
+    const imgUrl = targetImages.get(t.id);
+    const thumbHtml = imgUrl ? `<img class="target-thumb" src="${imgUrl}" alt="">` : '';
     return `
       <div class="target-card${sel}" data-id="${t.id}">
+        ${thumbHtml}
         <div class="target-main">
           <div class="target-row">
             <div class="target-id">${displayName}<span class="target-short-id">${t.label ? 'id: ' + shortId : ''}</span></div>
@@ -935,6 +945,29 @@ function toggleOutSim() {
 document.getElementById('out-sim-btn').addEventListener('click', toggleOutSim);
 
 // ---------------------------------------------------------------------------
+// RTMS frame crop
+// ---------------------------------------------------------------------------
+
+function cropBboxFromRtms(t) {
+  if (!rtmsCanvas || !rtmsCanvas.width || !rtmsCanvas.height) return null;
+  const w = t.bbox_width  || 0;
+  const h = t.bbox_height || 0;
+  if (w <= 0 || h <= 0) return null;
+  const scaleX = rtmsCanvas.width  / 1280;
+  const scaleY = rtmsCanvas.height / 720;
+  // bbox width/height are swapped relative to the display frame (portrait vs landscape)
+  const sx = Math.round((t.bbox_left || 0) * scaleX);
+  const sy = Math.round((t.bbox_top  || 0) * scaleY);
+  const sw = Math.max(1, Math.round(h * scaleY));  // use height as width
+  const sh = Math.max(1, Math.round(w * scaleX));  // use width as height
+  const off = document.createElement('canvas');
+  off.width  = sw;
+  off.height = sh;
+  off.getContext('2d').drawImage(rtmsCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+  try { return off.toDataURL('image/jpeg', 0.82); } catch { return null; }
+}
+
+// ---------------------------------------------------------------------------
 // RTMS PiP viewer
 // ---------------------------------------------------------------------------
 
@@ -943,6 +976,7 @@ document.getElementById('out-sim-btn').addEventListener('click', toggleOutSim);
 
   const container = document.getElementById('pip-container');
   const canvas    = document.getElementById('pip-canvas');
+  rtmsCanvas      = canvas;
   const statusEl  = document.getElementById('pip-status');
   const toggleBtn = document.getElementById('pip-toggle');
 
