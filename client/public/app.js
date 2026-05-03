@@ -50,6 +50,7 @@ let ws;
 let reconnectTimeout;
 let simInterval = null;
 let simTargetId = null;
+let outSimRunning = false;
 
 // ---------------------------------------------------------------------------
 // Map init
@@ -381,6 +382,22 @@ function handleMessage(msg) {
     return;
   }
 
+  if (msg.status === 'success' && msg.action === 'sim_start') {
+    outSimRunning = true;
+    const btn = document.getElementById('out-sim-btn');
+    btn.textContent = 'STOP OUT';
+    btn.classList.add('active');
+    return;
+  }
+
+  if (msg.status === 'success' && msg.action === 'sim_stop') {
+    outSimRunning = false;
+    const btn = document.getElementById('out-sim-btn');
+    btn.textContent = 'OUT SIM';
+    btn.classList.remove('active');
+    return;
+  }
+
   if (msg.event === 'beam_message') {
     const identity = msg.data.identity || {};
     const sender = identity.name || identity.id || msg.data.account_id || 'Unknown';
@@ -617,6 +634,13 @@ function toggleSim() {
 }
 
 document.getElementById('sim-btn').addEventListener('click', toggleSim);
+
+function toggleOutSim() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ action: outSimRunning ? 'sim_stop' : 'sim_start', payload: {} }));
+}
+
+document.getElementById('out-sim-btn').addEventListener('click', toggleOutSim);
 
 // ---------------------------------------------------------------------------
 // Basemap selector

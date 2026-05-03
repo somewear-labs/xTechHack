@@ -38,7 +38,10 @@ Server → all connected clients (broadcasts):
 """
 
 import asyncio
+import base64
 import json
+import math
+import random
 import time
 import uuid
 import logging
@@ -48,13 +51,18 @@ from typing import Any
 import websockets
 from websockets import ServerConnection as WebSocketServerProtocol
 from aiohttp import web
+import aiohttp
 
 try:
-    from proto_utils import base64_to_target_dict as _proto_decode
+    from proto_utils import (
+        base64_to_target_dict as _proto_decode,
+        target_dict_to_bytestring as _proto_encode,
+    )
     _PROTO_AVAILABLE = True
 except Exception as _proto_import_err:
     _PROTO_AVAILABLE = False
     _proto_decode = None
+    _proto_encode = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -62,6 +70,19 @@ log = logging.getLogger(__name__)
 HOST = "0.0.0.0"
 PORT = 8000
 HTTP_PORT = 8080
+
+BEAM_API_URL      = "http://localhost:9091/api/package/async"
+BEAM_WORKSPACE_ID = "71556"
+BEAM_CHANNELS     = ["Radio", "Cellular"]
+
+# Outbound sim defaults (near Shack15, SF)
+_SIM_LAT      = 37.7993
+_SIM_LNG      = -122.3983
+_SIM_RADIUS_M = 400
+_SIM_COUNT    = 3
+_SIM_INTERVAL = 2.0
+
+_sim_task: asyncio.Task | None = None
 
 TARGET_STATES = {
     "TARGET_STATE_UNKNOWN",
@@ -161,6 +182,103 @@ async def broadcast(event: str, data: Any, exclude: WebSocketServerProtocol | No
         await asyncio.gather(*[ws.send(msg) for ws in recipients], return_exceptions=True)
 
 
+async def send_to_beam_api(target: dict) -> None:
+    """Serialize target as proto, base64-encode, and POST to the Beam package API."""
+    if not _PROTO_AVAILABLE:
+        return
+    try:
+        content = base64.b64encode(_proto_encode(target)).decode()
+        body = {
+            "message":     {"content": content},
+            "channels":    BEAM_CHANNELS,
+            "workspaceId": BEAM_WORKSPACE_ID,
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(BEAM_API_URL, json=body) as resp:
+                log.info("beam_api: POST %s → HTTP %d (target %s)", BEAM_API_URL, resp.status, target.get("id"))
+    except Exception as exc:
+        log.warning("beam_api: failed to post target %s: %s", target.get("id"), exc)
+
+
+# ---------------------------------------------------------------------------
+# Outbound sim
+# ---------------------------------------------------------------------------
+
+def _sim_random_location() -> dict:
+    lat_deg = _SIM_RADIUS_M / 111000
+    lng_deg = _SIM_RADIUS_M / (111000 * math.cos(math.radians(_SIM_LAT)))
+    angle   = random.random() * 2 * math.pi
+    r       = math.sqrt(random.random())
+    lat     = _SIM_LAT + r * lat_deg * math.cos(angle)
+    lng     = _SIM_LNG + r * lng_deg * math.sin(angle)
+    return {
+        "longitude":          int(lng * 1e7),
+        "latitude":           int(lat * 1e7),
+        "timestamp":          int(time.time()),
+        "altitude":           0,
+        "speed_over_ground":  random.randint(0, 15000),
+        "course_over_ground": random.randint(0, 359999),
+    }
+
+
+async def _sim_loop() -> None:
+    sim_ids = [str(uuid.uuid4()) for _ in range(_SIM_COUNT)]
+    try:
+        for i, tid in enumerate(sim_ids):
+            target = {
+                "id":                tid,
+                "updated_date":      now_timestamp(),
+                "tracking_location": _sim_random_location(),
+                "state":             "TARGET_STATE_ACTIVE",
+                "workspace_id":      "sim-outbound",
+                "label":             f"SIM-{tid[:4].upper()}",
+            }
+            targets[tid] = target
+            await broadcast("target_created", target)
+            asyncio.create_task(send_to_beam_api(target))
+            await asyncio.sleep(0.05)
+
+        while True:
+            await asyncio.sleep(_SIM_INTERVAL)
+            tid = random.choice(sim_ids)
+            if tid not in targets:
+                continue
+            target = targets[tid]
+            target["tracking_location"] = _sim_random_location()
+            target["updated_date"]      = now_timestamp()
+            await broadcast("target_updated", target)
+            asyncio.create_task(send_to_beam_api(target))
+
+    except asyncio.CancelledError:
+        for tid in sim_ids:
+            if tid in targets:
+                del targets[tid]
+                await broadcast("target_deleted", {"id": tid})
+        raise
+
+
+async def handle_sim_start(_ws: WebSocketServerProtocol, _payload: Any) -> str:
+    global _sim_task
+    if _sim_task and not _sim_task.done():
+        return ok("sim_start", {"running": True})
+    _sim_task = asyncio.create_task(_sim_loop())
+    log.info("outbound sim started")
+    return ok("sim_start", {"running": True})
+
+
+async def handle_sim_stop(_ws: WebSocketServerProtocol, _payload: Any) -> str:
+    global _sim_task
+    if _sim_task and not _sim_task.done():
+        _sim_task.cancel()
+        try:
+            await _sim_task
+        except asyncio.CancelledError:
+            pass
+    _sim_task = None
+    log.info("outbound sim stopped")
+    return ok("sim_stop", {"running": False})
+
+
 # ---------------------------------------------------------------------------
 # action handlers
 # ---------------------------------------------------------------------------
@@ -176,6 +294,7 @@ async def handle_create(ws: WebSocketServerProtocol, payload: Any) -> str:
     targets[target["id"]] = target
     log.info("created target %s", target["id"])
     await broadcast("target_created", target, exclude=ws)
+    asyncio.create_task(send_to_beam_api(target))
     return ok("create", target)
 
 
@@ -226,6 +345,7 @@ async def handle_update(ws: WebSocketServerProtocol, payload: Any) -> str:
     target["updated_date"] = now_timestamp()
     log.info("updated target %s", target["id"])
     await broadcast("target_updated", target, exclude=ws)
+    asyncio.create_task(send_to_beam_api(target))
     return ok("update", target)
 
 
@@ -355,6 +475,8 @@ HANDLERS = {
     "update":     handle_update,
     "delete":     handle_delete,
     "beam_event": handle_beam_event,
+    "sim_start":  handle_sim_start,
+    "sim_stop":   handle_sim_stop,
 }
 
 
