@@ -13,12 +13,10 @@ const MAP_STYLES = {
 
 // Single source of truth for all state presentation
 const STATE_META = {
-  TARGET_STATE_ACTIVE:      { icon: '▲', color: '#226FEE', bg: 'rgba(34,111,238,0.18)',   label: 'ACTIVE',      short: 'ACTV' },
-  TARGET_STATE_ACQUIRED:    { icon: '◎', color: '#1EB982', bg: 'rgba(30,185,130,0.18)',   label: 'ACQUIRED',    short: 'ACQD' },
-  TARGET_STATE_INACTIVE:    { icon: '■', color: '#9B9B9B', bg: 'rgba(155,155,155,0.15)', label: 'INACTIVE',    short: 'INAC' },
-  TARGET_STATE_LOST:        { icon: '◈', color: '#F8C100', bg: 'rgba(248,193,0,0.18)',    label: 'LOST',        short: 'LOST' },
-  TARGET_STATE_NEUTRALIZED: { icon: '✕', color: '#E4591D', bg: 'rgba(228,89,29,0.18)',   label: 'NEUTRALIZED', short: 'NEUT' },
   TARGET_STATE_UNKNOWN:     { icon: '○', color: '#5F666C', bg: 'rgba(95,102,108,0.15)',  label: 'UNKNOWN',     short: 'UNKN' },
+  TARGET_STATE_CONFIRMED:   { icon: '◎', color: '#226FEE', bg: 'rgba(34,111,238,0.18)',  label: 'CONFIRMED',   short: 'CONF' },
+  TARGET_STATE_NEUTRALIZED: { icon: '✕', color: '#E4591D', bg: 'rgba(228,89,29,0.18)',  label: 'NEUTRALIZED', short: 'NEUT' },
+  TARGET_STATE_INACTIVE:    { icon: '■', color: '#9B9B9B', bg: 'rgba(155,155,155,0.15)', label: 'INACTIVE',    short: 'INAC' },
 };
 
 // Derived maps kept for Mapbox expressions and legacy use
@@ -150,7 +148,7 @@ function initTargetLayers() {
     id: LAYER_PULSE,
     type: 'circle',
     source: SOURCE_ID,
-    filter: ['==', ['get', 'state'], 'TARGET_STATE_ACTIVE'],
+    filter: ['==', ['get', 'state'], 'TARGET_STATE_CONFIRMED'],
     paint: {
       'circle-radius': 18,
       'circle-color': 'transparent',
@@ -204,12 +202,10 @@ function initTargetLayers() {
 function stateColorExpression() {
   return [
     'match', ['get', 'state'],
-    'TARGET_STATE_ACTIVE',      '#226FEE',
-    'TARGET_STATE_ACQUIRED',    '#1EB982',
-    'TARGET_STATE_INACTIVE',    '#9B9B9B',
-    'TARGET_STATE_LOST',        '#F8C100',
+    'TARGET_STATE_CONFIRMED',   '#226FEE',
     'TARGET_STATE_NEUTRALIZED', '#E4591D',
-    /* default */ '#5F666C',
+    'TARGET_STATE_INACTIVE',    '#9B9B9B',
+    /* default (UNKNOWN) */ '#5F666C',
   ];
 }
 
@@ -869,6 +865,7 @@ function randomNearSim(radiusM = 800) {
 function populateFakeTargets() {
   const states = Object.keys(STATE_META);
   const count = Math.min(NATO.length, states.length);
+
 
   for (let i = 0; i < count; i++) {
     const { lat, lng } = randomNearSim();

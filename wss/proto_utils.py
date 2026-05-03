@@ -6,11 +6,9 @@ import uuid
 
 from target_proto_pb2 import (
     TARGET_STATE_UNKNOWN,
-    TARGET_STATE_ACTIVE,
-    TARGET_STATE_INACTIVE,
-    TARGET_STATE_ACQUIRED,
-    TARGET_STATE_LOST,
+    TARGET_STATE_CONFIRMED,
     TARGET_STATE_NEUTRALIZED,
+    TARGET_STATE_INACTIVE,
     TargetResponse,
     TargetResponseDeltaList,
     Timestamp,
@@ -19,12 +17,25 @@ from target_proto_pb2 import (
 
 _STATE_TO_ENUM = {
     "TARGET_STATE_UNKNOWN":     TARGET_STATE_UNKNOWN,
-    "TARGET_STATE_ACTIVE":      TARGET_STATE_ACTIVE,
-    "TARGET_STATE_INACTIVE":    TARGET_STATE_INACTIVE,
-    "TARGET_STATE_ACQUIRED":    TARGET_STATE_ACQUIRED,
-    "TARGET_STATE_LOST":        TARGET_STATE_LOST,
+    "TARGET_STATE_CONFIRMED":   TARGET_STATE_CONFIRMED,
     "TARGET_STATE_NEUTRALIZED": TARGET_STATE_NEUTRALIZED,
+    "TARGET_STATE_INACTIVE":    TARGET_STATE_INACTIVE,
 }
+
+# State machine: UNKNOWN → CONFIRMED | INACTIVE; CONFIRMED → NEUTRALIZED; terminals: INACTIVE, NEUTRALIZED
+_VALID_TRANSITIONS: dict[str, set[str]] = {
+    "TARGET_STATE_UNKNOWN":     {"TARGET_STATE_CONFIRMED", "TARGET_STATE_INACTIVE"},
+    "TARGET_STATE_CONFIRMED":   {"TARGET_STATE_NEUTRALIZED"},
+    "TARGET_STATE_NEUTRALIZED": set(),
+    "TARGET_STATE_INACTIVE":    set(),
+}
+
+
+def is_valid_state_transition(from_state: str, to_state: str) -> bool:
+    """Return True if the from→to transition is allowed by the state machine."""
+    if from_state == to_state:
+        return True
+    return to_state in _VALID_TRANSITIONS.get(from_state, set())
 
 _ENUM_TO_STATE = {v: k for k, v in _STATE_TO_ENUM.items()}
 

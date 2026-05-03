@@ -39,13 +39,14 @@ message TrackingLocationDeltaList {
     repeated TrackingLocationDelta deltas = 2;
 }
 
+// State machine: UNKNOWN → CONFIRMED | INACTIVE
+//                CONFIRMED → NEUTRALIZED
+//                INACTIVE and NEUTRALIZED are terminal.
 enum TargetState {
-    TARGET_STATE_UNKNOWN = 0;
-    TARGET_STATE_ACTIVE = 1;
-    TARGET_STATE_INACTIVE = 2;
-    TARGET_STATE_ACQUIRED = 3;
-    TARGET_STATE_LOST = 4;
-    TARGET_STATE_NEUTRALIZED = 5;
+    TARGET_STATE_UNKNOWN     = 0;
+    TARGET_STATE_CONFIRMED   = 1;
+    TARGET_STATE_NEUTRALIZED = 2;
+    TARGET_STATE_INACTIVE    = 3;
 }
 
 message TargetResponse {

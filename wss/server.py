@@ -124,12 +124,14 @@ try:
         base64_to_target_dict as _proto_decode,
         base64_to_target_dicts as _proto_decode_list,
         target_dict_to_bytestring as _proto_encode,
+        is_valid_state_transition as _is_valid_transition,
     )
     _PROTO_AVAILABLE = True
 except Exception as _proto_import_err:
     _PROTO_AVAILABLE = False
     _proto_decode = None
     _proto_encode = None
+    _is_valid_transition = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -153,11 +155,9 @@ _sim_task: asyncio.Task | None = None
 
 TARGET_STATES = {
     "TARGET_STATE_UNKNOWN",
-    "TARGET_STATE_ACTIVE",
-    "TARGET_STATE_INACTIVE",
-    "TARGET_STATE_ACQUIRED",
-    "TARGET_STATE_LOST",
+    "TARGET_STATE_CONFIRMED",
     "TARGET_STATE_NEUTRALIZED",
+    "TARGET_STATE_INACTIVE",
 }
 
 # In-memory store: { id -> target_dict }
@@ -308,7 +308,7 @@ async def _sim_loop() -> None:
                 "id":                tid,
                 "updated_date":      now_timestamp(),
                 "tracking_location": _sim_random_location(),
-                "state":             "TARGET_STATE_ACTIVE",
+                "state":             "TARGET_STATE_CONFIRMED",
                 "workspace_id":      "sim-outbound",
                 "label":             f"SIM-{tid[:4].upper()}",
             }
@@ -439,7 +439,11 @@ async def handle_update(ws: WebSocketServerProtocol, payload: Any) -> str:
         error = validate_state(payload["state"])
         if error:
             return err("update", error)
-        target["state"] = payload["state"]
+        current_state = target.get("state", "TARGET_STATE_UNKNOWN")
+        new_state = payload["state"]
+        if _is_valid_transition and not _is_valid_transition(current_state, new_state):
+            return err("update", f"invalid state transition: {current_state} → {new_state}")
+        target["state"] = new_state
 
     if "workspace_id" in payload:
         target["workspace_id"] = payload["workspace_id"]
