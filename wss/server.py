@@ -197,9 +197,11 @@ def _try_decode_proto_target(content: str) -> dict | None:
     if not _PROTO_AVAILABLE or not content:
         return None
     try:
-        return _proto_decode(content)
+        result = _proto_decode(content)
+        log.info("proto decode OK: id=%s state=%s loc=%s", result.get("id"), result.get("state"), result.get("tracking_location"))
+        return result
     except Exception as exc:
-        log.debug("Message content is not a proto target: %s", exc)
+        log.warning("Message content failed proto decode: %s (b64 prefix=%s)", exc, content[:32])
         return None
 
 
@@ -481,6 +483,7 @@ async def handle_beam_event(ws: WebSocketServerProtocol, payload: Any) -> str:
                     await broadcast(event_name, target, exclude=ws)
                     upserted.append(target)
                 else:
+                    log.info("beam_event: Message not a TargetResponse proto, broadcasting raw (identity=%s content_prefix=%s)", identity_id, content[:32])
                     await broadcast("beam_message", {
                         "identity":   identity,
                         "account_id": workspace_id,
