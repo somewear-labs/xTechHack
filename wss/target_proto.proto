@@ -18,20 +18,20 @@ message Timestamp {
 message TrackingLocationDto {
     sint32 longitude = 1;
     sint32 latitude = 2;
-    fixed32 timestamp = 3;
+    // Field 3 was `fixed32 timestamp` — removed; updated_date on the parent
+    // TargetResponse carries authoritative time.
     sint32 altitude = 4;
-    uint32 speedOverGround = 5;
-    uint32 courseOverGround = 6;
+    // Fields 5/6 were `speedOverGround` / `courseOverGround` — removed; not
+    // produced by the inference pipeline.
 }
 
 
 message TrackingLocationDelta {
     sint32 longitudeDelta = 1;
     sint32 latitudeDelta = 2;
-    sint32 timestampDelta = 3;
+    // Field 3 reserved (was timestampDelta — removed alongside timestamp).
     sint32 altitudeDelta = 4;
-    sint32 speedOverGroundDelta = 5;
-    sint32 courseOverGroundDelta = 6;
+    // Fields 5/6 reserved (were speedOverGroundDelta / courseOverGroundDelta).
 }
 
 message TrackingLocationDeltaList {
@@ -49,23 +49,54 @@ enum TargetState {
 }
 
 message TargetResponse {
-    uint64 id = 1;
+    // Packed 16-bit id: (category << 8) | track_number, both 8-bit lanes.
+    // 256 classes × 256 simultaneous tracks per class. Wire-encoded as
+    // proto3 varint via uint32 — typically 1–3 bytes.
+    uint32 id = 1;
     Timestamp updated_date = 2;
     TrackingLocationDto tracking_location = 3;
     TargetState state = 4;
     uint64 workspace_id = 5;
-    // Pixel-space bbox at source resolution (1280x720), packed as four
-    // uint16 fields: (left << 48) | (top << 32) | (width << 16) | height.
-    fixed64 bbox = 6;
+    // bbox intentionally absent — bbox lives in the per-frame detection JSON
+    // path (UDS → bridge → browser overlay), not in the Beam proto path.
 }
 
-message TargetResponseList {
-    repeated TargetResponse targets = 1;
+// Per-target delta within a TargetResponseDeltaList. Encoded relative to the
+// list's baseTarget so a tightly-clustered group compresses well:
+//   target.id              = base.id  +  idDelta (zigzag sint64)
+//   target.state           = delta.state if set, else base.state
+//   target.updated_date    = delta.updated_date if set, else base.updated_date
+//   target.tracking_location.{long,lat,timestamp,alt,sog,cog}
+//                          = base.<field> + location_delta.<field>Delta
+//                            (each *Delta is sint32, zigzag-encoded)
+// Field tags 2/3/4 mirror TargetResponse so debug greps look familiar.
+message TargetResponseDelta {
+    // Signed 16-bit-magnitude id offset: this.id - base.id. zigzag varint;
+    // a base + 7 deltas where ids cluster within ±127 each encodes in 1 B.
+    sint32 id_delta = 1;
+    Timestamp updated_date = 2;
+    TrackingLocationDelta location_delta = 3;
+    optional TargetState state = 4;
+}
+
+// Mirrors TrackingLocationDeltaList: a base + repeated deltas relative to it.
+// Sender picks baseTarget = the dirty target with the lowest non-terminal id
+// in the chunk; receiver reconstructs full TargetResponse for each delta by
+// adding its delta to the base. Batches are capped at 8 entries (1 base + 7
+// deltas in the worst case) so a single batch fits any radio MTU.
+//
+// workspace_id at the top level lets the receiver verify routing without
+// having to crack open baseTarget.workspace_id — and stays correct if a
+// future revision drops it from the per-target proto.
+message TargetResponseDeltaList {
+    TargetResponse base_target = 1;
+    repeated TargetResponseDelta deltas = 2;
+    uint64 workspace_id = 3;
 }
 
 // Inbound state update over UDS. Field tags match TargetResponse so a sender
 // could ship a full TargetResponse and we'd parse just id + state.
 message TargetUpdate {
-    uint64 id = 1;
+    uint32 id = 1;
     TargetState state = 4;
 }

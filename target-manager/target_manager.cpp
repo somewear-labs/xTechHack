@@ -317,13 +317,38 @@ void TargetManager::flush_once() {
     }
     if (snapshot.empty()) return;
 
-    std::printf("[tm] flush: posting %zu target(s) in 1 batch to beam\n", snapshot.size());
-    post_batch(snapshot);
+    constexpr std::size_t MAX_PER_BATCH = 8;
+    const std::size_t total = snapshot.size();
+    const std::size_t n_batches = (total + MAX_PER_BATCH - 1) / MAX_PER_BATCH;
+    std::printf("[tm] flush: posting %zu target(s) in %zu batch(es) of <=%zu\n",
+                total, n_batches, MAX_PER_BATCH);
+
+    for (std::size_t off = 0; off < total; off += MAX_PER_BATCH) {
+        std::size_t end = std::min(off + MAX_PER_BATCH, total);
+        std::vector<Target> chunk(snapshot.begin() + off, snapshot.begin() + end);
+        post_batch(chunk);
+    }
 }
 
-void TargetManager::post_batch(const std::vector<Target> &snapshot) {
-    TargetResponseList batch;
-    batch.mutable_targets()->Reserve(static_cast<int>(snapshot.size()));
+void TargetManager::post_batch(const std::vector<Target> &chunk) {
+    if (chunk.empty()) return;
+
+    // Pick base = lowest non-terminal id. Non-terminal here means
+    // state != NEUTRALIZED (5). INACTIVE (2) targets are erased from
+    // targets_ on the inbound transition, so they never reach this path.
+    const Target *base = nullptr;
+    for (const auto &t : chunk) {
+        if (t.state == 5 /*NEUTRALIZED*/) continue;
+        if (!base || t.id < base->id) base = &t;
+    }
+    // Fallback: every dirty target in the chunk is NEUTRALIZED — degenerate
+    // edge case; pick the lowest id regardless so the batch still ships.
+    if (!base) {
+        for (const auto &t : chunk) {
+            if (!base || t.id < base->id) base = &t;
+        }
+    }
+    if (!base) return;
 
     std::uint64_t workspace_id_u64 = 0;
     bool          have_workspace_id = false;
@@ -332,30 +357,55 @@ void TargetManager::post_batch(const std::vector<Target> &snapshot) {
         catch (...) {}
     }
 
-    for (const auto &t : snapshot) {
-        TargetResponse *msg = batch.add_targets();
-        msg->set_id(static_cast<std::int64_t>(t.id));
-        auto *upd = msg->mutable_updated_date();
-        upd->set_seconds(t.last_seen ? t.last_seen : now_unix_seconds());
-        upd->set_nanos(0);
-        auto *loc = msg->mutable_tracking_location();
-        loc->set_latitude (static_cast<std::int32_t>(t.latitude  * 1e7));
-        loc->set_longitude(static_cast<std::int32_t>(t.longitude * 1e7));
-        loc->set_timestamp(static_cast<std::uint32_t>(t.last_seen ? t.last_seen : now_unix_seconds()));
-        msg->set_state(static_cast<TargetState>(t.state));
-        if (have_workspace_id) msg->set_workspace_id(workspace_id_u64);
-        // Pack bbox as four uint16 fields: (left<<48) | (top<<32) | (width<<16) | height.
-        std::uint64_t bbox_packed =
-            (static_cast<std::uint64_t>(static_cast<std::uint16_t>(t.bbox_left))   << 48) |
-            (static_cast<std::uint64_t>(static_cast<std::uint16_t>(t.bbox_top))    << 32) |
-            (static_cast<std::uint64_t>(static_cast<std::uint16_t>(t.bbox_width))  << 16) |
-             static_cast<std::uint64_t>(static_cast<std::uint16_t>(t.bbox_height));
-        msg->set_bbox(bbox_packed);
+    TargetResponseDeltaList batch;
+    if (have_workspace_id) batch.set_workspace_id(workspace_id_u64);
+
+    // Pack base full state. bbox intentionally omitted — bbox lives only in
+    // the per-frame UDS path. tracking_location.timestamp also omitted (was
+    // duplicating updated_date.seconds); updated_date is now the sole time.
+    const std::int64_t  base_ts_i64 = base->last_seen ? base->last_seen : now_unix_seconds();
+    {
+        TargetResponse *b = batch.mutable_base_target();
+        b->set_id(base->id);
+        b->mutable_updated_date()->set_seconds(base_ts_i64);
+        auto *bloc = b->mutable_tracking_location();
+        bloc->set_latitude (static_cast<std::int32_t>(base->latitude  * 1e7));
+        bloc->set_longitude(static_cast<std::int32_t>(base->longitude * 1e7));
+        b->set_state(static_cast<TargetState>(base->state));
+        if (have_workspace_id) b->set_workspace_id(workspace_id_u64);
+    }
+
+    // Snapshot base scalars for delta computation.
+    const std::int32_t base_id_i32    = static_cast<std::int32_t>(base->id);
+    const std::int32_t base_lat_i32   = static_cast<std::int32_t>(base->latitude  * 1e7);
+    const std::int32_t base_lon_i32   = static_cast<std::int32_t>(base->longitude * 1e7);
+    const int          base_state_int = base->state;
+
+    // Per-target deltas relative to base. Skip base itself.
+    for (const auto &t : chunk) {
+        if (&t == base) continue;
+        TargetResponseDelta *d = batch.add_deltas();
+        d->set_id_delta(static_cast<std::int32_t>(t.id) - base_id_i32);
+
+        const std::int32_t this_lat_i32 = static_cast<std::int32_t>(t.latitude  * 1e7);
+        const std::int32_t this_lon_i32 = static_cast<std::int32_t>(t.longitude * 1e7);
+
+        // Location delta — only emit if any component differs from base.
+        if (this_lat_i32 != base_lat_i32 || this_lon_i32 != base_lon_i32) {
+            auto *dloc = d->mutable_location_delta();
+            dloc->set_longitude_delta(this_lon_i32 - base_lon_i32);
+            dloc->set_latitude_delta (this_lat_i32 - base_lat_i32);
+        }
+
+        // State only when it differs from base.
+        if (t.state != base_state_int) {
+            d->set_state(static_cast<TargetState>(t.state));
+        }
     }
 
     std::string proto_bytes;
     if (!batch.SerializeToString(&proto_bytes)) {
-        std::printf("[tm] post_batch: SerializeToString failed (n=%zu)\n", snapshot.size());
+        std::printf("[tm] post_batch: SerializeToString failed (n=%zu)\n", chunk.size());
         return;
     }
     std::string body =
@@ -366,11 +416,12 @@ void TargetManager::post_batch(const std::vector<Target> &snapshot) {
     // Detach a worker that owns its own curl handle. Beam's `message send`
     // CLI is synchronous on the radio link, so a single POST can hang for
     // tens of seconds. Fire-and-forget keeps the flusher loop unblocked.
-    std::size_t   n         = snapshot.size();
-    std::size_t   body_size = body.size();
+    std::size_t   n          = chunk.size();
+    std::uint64_t base_id_u  = base->id;
+    std::size_t   body_size  = body.size();
     std::size_t   proto_size = proto_bytes.size();
-    std::string   url       = beam_api_url_;
-    std::thread([n, body_size, proto_size, url = std::move(url), body = std::move(body)]() {
+    std::string   url        = beam_api_url_;
+    std::thread([n, base_id_u, body_size, proto_size, url = std::move(url), body = std::move(body)]() {
         CURL *c = curl_easy_init();
         if (!c) return;
         curl_slist *headers = curl_slist_append(nullptr, "Content-Type: application/json");
@@ -386,11 +437,11 @@ void TargetManager::post_batch(const std::vector<Target> &snapshot) {
         long http = 0;
         curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http);
         if (rc == CURLE_OK) {
-            std::printf("[tm] post batch=%zu proto=%zuB body=%zuB http=%ld\n",
-                        n, proto_size, body_size, http);
+            std::printf("[tm] post chunk=%zu base_id=%" PRIu64 " proto=%zuB body=%zuB http=%ld\n",
+                        n, base_id_u, proto_size, body_size, http);
         } else {
-            std::printf("[tm] post batch=%zu curl err: %s (http=%ld)\n",
-                        n, curl_easy_strerror(rc), http);
+            std::printf("[tm] post chunk=%zu base_id=%" PRIu64 " curl err: %s (http=%ld)\n",
+                        n, base_id_u, curl_easy_strerror(rc), http);
         }
         std::fflush(stdout);
 
@@ -447,8 +498,8 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
 
             // Mirrors the Target ctor packing in target_manager.hpp.
             const std::uint64_t packed_id =
-                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(obj->class_id) + 1) << 32) |
-                obj->object_id;
+                ((static_cast<std::uint64_t>(obj->class_id) & 0xFFull) << 8) |
+                 (static_cast<std::uint64_t>(obj->object_id) & 0xFFull);
             {
                 std::lock_guard<std::mutex> lk(inactive_mu_);
                 if (inactive_ids_.count(packed_id)) {
@@ -574,8 +625,8 @@ void TargetManager::apply_colors(NvDsBatchMeta *batch_meta) {
         for (NvDsMetaList *lo = frame_meta->obj_meta_list; lo; lo = lo->next) {
             auto *obj = static_cast<NvDsObjectMeta *>(lo->data);
             const std::uint64_t packed_id =
-                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(obj->class_id) + 1) << 32) |
-                obj->object_id;
+                ((static_cast<std::uint64_t>(obj->class_id)  & 0xFFull) << 8) |
+                 (static_cast<std::uint64_t>(obj->object_id) & 0xFFull);
 
             int  state         = 0;   // UNKNOWN default
             bool state_changed = false;
@@ -617,6 +668,12 @@ void TargetManager::apply_colors(NvDsBatchMeta *batch_meta) {
             rp.border_color.alpha = a;
             rp.border_width       = width;
             rp.has_color_info     = 0;
+
+            if (state_changed) {
+                std::printf("[tm-color] id=%" PRIu64 " -> %s (rgba=%.1f,%.1f,%.1f,%.1f w=%u)\n",
+                            packed_id, state_name(state), r, g, b, a, width);
+                std::fflush(stdout);
+            }
         }
     }
 }

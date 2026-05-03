@@ -38,8 +38,9 @@ STATES = {
 
 
 def pack_id(class_id: int, object_id: int) -> int:
-    # Matches target_manager.hpp Target ctor: ((class_id+1) << 32) | object_id.
-    return ((class_id + 1) & 0xFFFFFFFF) << 32 | (object_id & 0xFFFFFFFF)
+    # Matches target_manager.hpp Target ctor: 16-bit packed id where the
+    # upper byte is class_id and the lower byte is object_id mod 256.
+    return ((class_id & 0xFF) << 8) | (object_id & 0xFF)
 
 
 def main() -> int:

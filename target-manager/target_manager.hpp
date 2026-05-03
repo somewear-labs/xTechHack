@@ -69,10 +69,15 @@ struct Target {
     int last_painted_state = -1;
 
     Target(int class_id, std::uint64_t obj_id) {
-        // (class_id + 1) in high 32 bits guarantees high half >= 1, so id is
-        // never 0 even when class_id=0 and obj_id=0. Receiver recovers the
-        // original class with `(id >> 32) - 1`.
-        this->id = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(class_id) + 1) << 32) | obj_id;
+        // 16-bit packed id: upper byte = class_id (0–255), lower byte =
+        // track number (object_id mod 256). Receiver decodes:
+        //   class_id = (id >> 8) & 0xFF
+        //   obj_id   =  id       & 0xFF
+        // Note: object_id wraps modulo 256, so deepstream tracker IDs that
+        // grow past 255 alias onto the same byte slot. Acceptable at our
+        // simultaneous-track scale; revisit if track lifetimes grow.
+        this->id = ((static_cast<std::uint64_t>(class_id)  & 0xFFull) << 8)
+                 |  (static_cast<std::uint64_t>(obj_id)    & 0xFFull);
     }
 };
 
@@ -109,6 +114,11 @@ private:
     float                             reid_sim_threshold_ = 0.7f;
     std::size_t                       reid_max_banned_    = 256;
     int                               inactive_ttl_sec_   = 300;   // 5 min
+    // When true, post_batch builds the proto + prints a human-readable
+    // summary instead of running curl. Useful for local-only sanity checks
+    // against the live tracker without firing Beam packages. Toggled by
+    // the TM_DRY_RUN env var.
+    bool                              dry_run_            = false;
     bool                              verbose_frames_     = false;
     std::shared_ptr<CameraGeolocator> geo_;
 
