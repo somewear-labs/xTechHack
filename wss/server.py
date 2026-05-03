@@ -85,6 +85,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+import aiohttp
 import websockets
 from websockets import ServerConnection as WebSocketServerProtocol
 from aiohttp import web
@@ -134,6 +135,9 @@ except Exception as _proto_import_err:
     _is_valid_transition = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+if not _PROTO_AVAILABLE:
+    logging.getLogger(__name__).warning("proto_utils unavailable — Beam posts will use JSON fallback: %s", _proto_import_err)
 log = logging.getLogger(__name__)
 
 HOST = "0.0.0.0"
@@ -262,21 +266,27 @@ async def broadcast(event: str, data: Any, exclude: WebSocketServerProtocol | No
 
 
 async def send_to_beam_api(target: dict) -> None:
-    """Serialize target as proto, base64-encode, and POST to the Beam package API."""
-    if not _PROTO_AVAILABLE:
-        return
+    """POST target state to the Beam package API (proto if available, else JSON)."""
     try:
-        content = base64.b64encode(_proto_encode(target)).decode()
+        if _PROTO_AVAILABLE:
+            content = base64.b64encode(_proto_encode(target)).decode()
+        else:
+            content = json.dumps({
+                "id":    target.get("id"),
+                "state": target.get("state"),
+                "tracking_location": target.get("tracking_location"),
+            })
         body = {
             "message":     {"content": content},
             "channels":    BEAM_CHANNELS,
             "workspaceId": BEAM_WORKSPACE_ID,
         }
+        log.info("beam_api: posting target %s state=%s (proto=%s)", target.get("id"), target.get("state"), _PROTO_AVAILABLE)
         async with aiohttp.ClientSession() as session:
             async with session.post(BEAM_API_URL, json=body) as resp:
                 log.info("beam_api: POST %s → HTTP %d (target %s)", BEAM_API_URL, resp.status, target.get("id"))
     except Exception as exc:
-        log.warning("beam_api: failed to post target %s: %s", target.get("id"), exc)
+        log.warning("beam_api: failed to post target %s: %s", target.get("id"), exc, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -425,15 +435,25 @@ async def handle_update(ws: WebSocketServerProtocol, payload: Any) -> str:
     if not isinstance(payload, dict) or "id" not in payload:
         return err("update", "payload must contain 'id'")
 
-    target = targets.get(payload["id"])
+    raw_id = payload["id"]
+    target = targets.get(raw_id)
     if target is None:
-        return err("update", f"target {payload['id']} not found")
+        # HTML dataset coerces integer IDs to strings; try the numeric form too
+        try:
+            target = targets.get(int(raw_id))
+        except (ValueError, TypeError):
+            pass
+    if target is None:
+        return err("update", f"target {raw_id} not found")
 
     if "tracking_location" in payload:
-        error = validate_tracking_location(payload["tracking_location"])
+        loc = payload["tracking_location"]
+        error = validate_tracking_location(loc)
         if error:
             return err("update", error)
-        target["tracking_location"] = payload["tracking_location"]
+        # Zeroed lat/lng signals a state-only update — preserve existing location
+        if loc.get("longitude", 0) != 0 or loc.get("latitude", 0) != 0:
+            target["tracking_location"] = loc
 
     if "state" in payload:
         error = validate_state(payload["state"])
@@ -442,6 +462,7 @@ async def handle_update(ws: WebSocketServerProtocol, payload: Any) -> str:
         current_state = target.get("state", "TARGET_STATE_UNKNOWN")
         new_state = payload["state"]
         if _is_valid_transition and not _is_valid_transition(current_state, new_state):
+            log.warning("state machine rejected %s → %s for target %s", current_state, new_state, target.get("id"))
             return err("update", f"invalid state transition: {current_state} → {new_state}")
         target["state"] = new_state
 
@@ -451,6 +472,7 @@ async def handle_update(ws: WebSocketServerProtocol, payload: Any) -> str:
     target["updated_date"] = now_timestamp()
     log.info("updated target %s", target["id"])
     await broadcast("target_updated", target, exclude=ws)
+    asyncio.create_task(send_to_beam_api(target))
     return ok("update", target)
 
 
@@ -603,7 +625,6 @@ async def handler(ws: WebSocketServerProtocol) -> None:
     }))
     try:
         async for raw in ws:
-            log.info("recv << %s", raw)
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
@@ -612,6 +633,9 @@ async def handler(ws: WebSocketServerProtocol) -> None:
 
             action = msg.get("action")
             payload = msg.get("payload")
+
+            if not (action == "publish" and isinstance(payload, dict) and payload.get("event") == "frame_detection"):
+                log.info("recv << %s", raw)
 
             fn = HANDLERS.get(action)
             if fn is None:

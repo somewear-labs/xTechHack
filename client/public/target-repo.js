@@ -16,45 +16,52 @@ function isValidStateTransition(from, to) {
 class TargetRepo {
   #targets = new Map();
 
+  // Always use string keys so integer IDs from real targets and UUID strings
+  // from mock targets are looked up consistently (HTML dataset is always string).
+  #k(id) { return String(id); }
+
   get count() { return this.#targets.size; }
 
-  get(id) { return this.#targets.get(id) ?? null; }
+  get(id) { return this.#targets.get(this.#k(id)) ?? null; }
 
   list() { return [...this.#targets.values()]; }
 
   create(target) {
-    if (this.#targets.has(target.id)) return false;
-    this.#targets.set(target.id, target);
+    const k = this.#k(target.id);
+    if (this.#targets.has(k)) return false;
+    this.#targets.set(k, target);
     return true;
   }
 
   // Returns true only if the target existed, the incoming is strictly newer,
   // and the state transition is valid.
   update(target) {
-    const existing = this.#targets.get(target.id);
+    const k = this.#k(target.id);
+    const existing = this.#targets.get(k);
     if (!existing) return false;
     if (!this.#isNewer(target, existing)) return false;
     if (!isValidStateTransition(existing.state, target.state)) return false;
-    this.#targets.set(target.id, target);
+    this.#targets.set(k, target);
     return true;
   }
 
   // Create-or-update: skips when incoming is not newer or state transition is invalid.
   upsert(target) {
-    const existing = this.#targets.get(target.id);
+    const k = this.#k(target.id);
+    const existing = this.#targets.get(k);
     if (existing) {
       if (!this.#isNewer(target, existing)) return false;
       if (!isValidStateTransition(existing.state, target.state)) return false;
     }
-    this.#targets.set(target.id, target);
+    this.#targets.set(k, target);
     return true;
   }
 
-  delete(id) { return this.#targets.delete(id); }
+  delete(id) { return this.#targets.delete(this.#k(id)); }
 
   reset(targets) {
     this.#targets.clear();
-    for (const t of targets) this.#targets.set(t.id, t);
+    for (const t of targets) this.#targets.set(this.#k(t.id), t);
   }
 
   #isNewer(incoming, existing) {

@@ -426,24 +426,36 @@ function stateBadgeHtml(state) {
 }
 
 function stateDropdownHtml(currentState) {
-  return Object.entries(STATE_META).map(([key, m]) => `
-    <div class="state-drop-item${currentState === key ? ' current' : ''}" data-state="${key}"
-         style="--item-color:${m.color}">
-      <span class="state-icon">${m.icon}</span>${m.label}
-    </div>`).join('');
+  return Object.entries(STATE_META)
+    .filter(([key]) => key === currentState || isValidStateTransition(currentState, key))
+    .map(([key, m]) => `
+      <div class="state-drop-item${currentState === key ? ' current' : ''}" data-state="${key}"
+           style="--item-color:${m.color}">
+        <span class="state-icon">${m.icon}</span>${m.label}
+      </div>`).join('');
 }
 
 function updateTargetState(id, newState) {
   const current = repo.get(id);
-  if (current) {
-    const updated = { ...current, state: newState, updated_date: { seconds: Math.floor(Date.now() / 1000), nanos: 0 } };
-    repo.upsert(updated);
-    rebuildSource();
-    renderList();
-    if (selectedId === id) renderPopup(updated);
-  }
+  if (!current) return;
+
+  // Optimistic in-memory update — preserve existing location
+  const updated = { ...current, state: newState, updated_date: { seconds: Math.floor(Date.now() / 1000), nanos: 0 } };
+  if (!repo.upsert(updated)) return; // rejected by state machine
+  rebuildSource();
+  renderList();
+  if (selectedId === id) renderMapOverlay(updated);
+
+  // Emit to server with zeroed coords to signal state-only update
   if (ws?.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ action: 'update', payload: { id, state: newState } }));
+    ws.send(JSON.stringify({
+      action: 'update',
+      payload: {
+        id,
+        state: newState,
+        tracking_location: { longitude: 0, latitude: 0, timestamp: Math.floor(Date.now() / 1000), altitude: 0, speed_over_ground: 0, course_over_ground: 0 },
+      },
+    }));
   }
 }
 
@@ -707,7 +719,9 @@ function renderMapOverlay(t) {
     : '--';
 
   const statePicker = Object.entries(STATE_META).map(([key, m]) => {
-    const active = t.state === key;
+    const active   = t.state === key;
+    const allowed  = active || isValidStateTransition(t.state, key);
+    if (!allowed) return '';
     return `<button class="ol-state-btn${active ? ' active' : ''}" data-state="${key}" data-id="${t.id}"
       style="color:${m.color}${active ? `;border-color:${m.color};background:${m.bg}` : ''}">
       <span>${m.icon}</span><span>${m.short}</span>
@@ -736,16 +750,7 @@ function renderMapOverlay(t) {
   inner.querySelectorAll('.ol-state-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
-      const id       = btn.dataset.id;
-      const newState = btn.dataset.state;
-      const current  = repo.get(id);
-      if (current) {
-        const optimistic = { ...current, state: newState, updated_date: { seconds: Math.floor(Date.now() / 1000), nanos: 0 } };
-        if (repo.upsert(optimistic)) { rebuildSource(); renderList(); renderMapOverlay(optimistic); }
-      }
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ action: 'update', payload: { id, state: newState } }));
-      }
+      updateTargetState(btn.dataset.id, btn.dataset.state);
     });
   });
 
