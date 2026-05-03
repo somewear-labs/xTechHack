@@ -48,6 +48,7 @@ let popup = null;
 let map;
 let ws;
 let reconnectTimeout;
+let simInterval = null;
 
 // ---------------------------------------------------------------------------
 // Map init
@@ -436,7 +437,7 @@ function selectTarget(id, flyTo) {
     const lng = (loc.longitude || 0) / 1e7;
     const lat = (loc.latitude  || 0) / 1e7;
     if (lng !== 0 || lat !== 0) {
-      map.flyTo({ center: [lng, lat], zoom: Math.max(map.getZoom(), 8), duration: 800 });
+      map.flyTo({ center: [lng, lat], zoom: Math.max(map.getZoom(), 14), duration: 800 });
     }
   }
 
@@ -500,6 +501,27 @@ function renderPopup(t) {
     renderList();
   });
 }
+
+// ---------------------------------------------------------------------------
+// Sim loop
+// ---------------------------------------------------------------------------
+
+function toggleSim() {
+  const btn = document.getElementById('sim-btn');
+  if (simInterval) {
+    clearInterval(simInterval);
+    simInterval = null;
+    btn.textContent = 'SIM';
+    btn.classList.remove('active');
+  } else {
+    fetch('/emit', { method: 'POST' });
+    simInterval = setInterval(() => fetch('/emit', { method: 'POST' }), 2000);
+    btn.textContent = 'STOP';
+    btn.classList.add('active');
+  }
+}
+
+document.getElementById('sim-btn').addEventListener('click', toggleSim);
 
 // ---------------------------------------------------------------------------
 // Basemap selector
