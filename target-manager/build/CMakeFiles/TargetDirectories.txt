@@ -1,0 +1,3 @@
+/home/swl-jetson-1/xTechHack/target-manager/build/CMakeFiles/target_manager.dir
+/home/swl-jetson-1/xTechHack/target-manager/build/CMakeFiles/edit_cache.dir
+/home/swl-jetson-1/xTechHack/target-manager/build/CMakeFiles/rebuild_cache.dir

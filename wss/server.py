@@ -39,19 +39,43 @@ Server → all connected clients (broadcasts):
 
 import asyncio
 import base64
+import base64
 import json
 import math
 import random
+import logging
+import os
+import socket
 import time
 import uuid
-import logging
 from datetime import datetime, timezone
 from typing import Any
 
 import websockets
 from websockets import ServerConnection as WebSocketServerProtocol
 from aiohttp import web
-import aiohttp
+
+# Outbound Unix-domain SOCK_DGRAM toward target-manager — every Beam Message
+# event's content (base64 of TargetResponse proto bytes) gets b64-decoded and
+# pushed to this socket. target-manager's listener prints/parses raw bytes.
+TM_INBOUND_SOCKET = os.environ.get(
+    "TM_INBOUND_SOCKET",
+    "/home/swl-jetson-1/swl-vision/run/target-manager.sock",
+)
+_tm_sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+
+
+def _forward_to_tm(raw_b64: str) -> None:
+    """Decode + sendto target-manager. Tolerates the no-listener case."""
+    if not raw_b64 or not TM_INBOUND_SOCKET:
+        return
+    try:
+        raw = base64.b64decode(raw_b64)
+        _tm_sock.sendto(raw, TM_INBOUND_SOCKET)
+    except (FileNotFoundError, ConnectionRefusedError, OSError) as exc:
+        logging.getLogger(__name__).debug("forward-to-tm dropped: %s", exc)
+    except Exception as exc:  # base64 decode error or unexpected
+        logging.getLogger(__name__).warning("forward-to-tm error: %s", exc)
 
 try:
     from proto_utils import (
@@ -438,6 +462,7 @@ async def handle_beam_event(ws: WebSocketServerProtocol, payload: Any) -> str:
 
             elif event_type == "Message":
                 content = event.get("content", "")
+                _forward_to_tm(content)
                 target = _try_decode_proto_target(content)
                 if target is not None:
                     target_id = target["id"]

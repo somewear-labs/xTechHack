@@ -1,0 +1,17 @@
+[
+{
+  "directory": "/home/swl-jetson-1/xTechHack/target-manager/build",
+  "command": "/usr/bin/c++  -I/home/swl-jetson-1/xTechHack/target-manager -I/opt/nvidia/deepstream/deepstream/sources/includes -I/home/swl-jetson-1/xTechHack/target-manager/build/generated -isystem /usr/include/glib-2.0 -isystem /usr/lib/aarch64-linux-gnu/glib-2.0/include -isystem /usr/include/gstreamer-1.0 -fPIC -Wall -Wextra -Wno-unused-parameter -pthread -std=c++20 -o CMakeFiles/target_manager.dir/target_manager.cpp.o -c /home/swl-jetson-1/xTechHack/target-manager/target_manager.cpp",
+  "file": "/home/swl-jetson-1/xTechHack/target-manager/target_manager.cpp"
+},
+{
+  "directory": "/home/swl-jetson-1/xTechHack/target-manager/build",
+  "command": "/usr/bin/c++  -I/home/swl-jetson-1/xTechHack/target-manager -I/opt/nvidia/deepstream/deepstream/sources/includes -I/home/swl-jetson-1/xTechHack/target-manager/build/generated -isystem /usr/include/glib-2.0 -isystem /usr/lib/aarch64-linux-gnu/glib-2.0/include -isystem /usr/include/gstreamer-1.0 -fPIC -Wall -Wextra -Wno-unused-parameter -pthread -std=c++20 -o CMakeFiles/target_manager.dir/geolocation.cpp.o -c /home/swl-jetson-1/xTechHack/target-manager/geolocation.cpp",
+  "file": "/home/swl-jetson-1/xTechHack/target-manager/geolocation.cpp"
+},
+{
+  "directory": "/home/swl-jetson-1/xTechHack/target-manager/build",
+  "command": "/usr/bin/c++  -I/home/swl-jetson-1/xTechHack/target-manager -I/opt/nvidia/deepstream/deepstream/sources/includes -I/home/swl-jetson-1/xTechHack/target-manager/build/generated -isystem /usr/include/glib-2.0 -isystem /usr/lib/aarch64-linux-gnu/glib-2.0/include -isystem /usr/include/gstreamer-1.0 -fPIC -Wall -Wextra -Wno-unused-parameter -pthread -std=c++20 -o CMakeFiles/target_manager.dir/generated/target_proto.pb.cc.o -c /home/swl-jetson-1/xTechHack/target-manager/build/generated/target_proto.pb.cc",
+  "file": "/home/swl-jetson-1/xTechHack/target-manager/build/generated/target_proto.pb.cc"
+}
+]

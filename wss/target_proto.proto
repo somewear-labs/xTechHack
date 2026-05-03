@@ -49,11 +49,11 @@ enum TargetState {
 }
 
 message TargetResponse {
-    string id = 1;
+    uint64 id = 1;
     Timestamp updated_date = 2;
     TrackingLocationDto tracking_location = 3;
     TargetState state = 4;
-    string workspace_id = 5;
+    uint64 workspace_id = 5;
 }
 
 message TargetResponseList {

@@ -1,0 +1,2 @@
+/usr/bin/ar qc libtarget_manager.a CMakeFiles/target_manager.dir/target_manager.cpp.o CMakeFiles/target_manager.dir/geolocation.cpp.o CMakeFiles/target_manager.dir/generated/target_proto.pb.cc.o
+/usr/bin/ranlib libtarget_manager.a
