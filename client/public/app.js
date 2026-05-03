@@ -381,19 +381,12 @@ function handleMessage(msg) {
     return;
   }
 
-  if (msg.status === 'success' && msg.action === 'sim_start') {
-    outSimRunning = true;
+  if (msg.event === 'sim_state' || (msg.status === 'success' && (msg.action === 'sim_start' || msg.action === 'sim_stop'))) {
+    const running = msg.event === 'sim_state' ? msg.data.running : (msg.action === 'sim_start');
+    outSimRunning = running;
     const btn = document.getElementById('out-sim-btn');
-    btn.textContent = 'STOP OUT';
-    btn.classList.add('active');
-    return;
-  }
-
-  if (msg.status === 'success' && msg.action === 'sim_stop') {
-    outSimRunning = false;
-    const btn = document.getElementById('out-sim-btn');
-    btn.textContent = 'OUT SIM';
-    btn.classList.remove('active');
+    btn.textContent = running ? 'STOP OUT' : 'OUT SIM';
+    btn.classList.toggle('active', running);
     return;
   }
 
@@ -700,7 +693,7 @@ function renderPopup(t) {
     <div class="popup-section-label">SET STATE</div>
     <div class="popup-state-picker">${statePicker}</div>`;
 
-  popup = new mapboxgl.Popup({ closeButton: true, maxWidth: '280px', offset: 14 })
+  popup = new mapboxgl.Popup({ closeButton: true, maxWidth: '320px', offset: 14 })
     .setLngLat([lng, lat])
     .setHTML(html);
 

@@ -322,7 +322,6 @@ async def handle_create(ws: WebSocketServerProtocol, payload: Any) -> str:
     targets[target["id"]] = target
     log.info("created target %s", target["id"])
     await broadcast("target_created", target, exclude=ws)
-    asyncio.create_task(send_to_beam_api(target))
     return ok("create", target)
 
 
@@ -377,7 +376,6 @@ async def handle_update(ws: WebSocketServerProtocol, payload: Any) -> str:
     target["updated_date"] = now_timestamp()
     log.info("updated target %s", target["id"])
     await broadcast("target_updated", target, exclude=ws)
-    asyncio.create_task(send_to_beam_api(target))
     return ok("update", target)
 
 
@@ -518,8 +516,14 @@ HANDLERS = {
 # ---------------------------------------------------------------------------
 
 async def handler(ws: WebSocketServerProtocol) -> None:
+    global _sim_task
     connected.add(ws)
     log.info("client connected  (%d total)", len(connected))
+    # Tell the client whether the outbound sim is currently running
+    await ws.send(json.dumps({
+        "event": "sim_state",
+        "data":  {"running": _sim_task is not None and not _sim_task.done()},
+    }))
     try:
         async for raw in ws:
             log.info("recv << %s", raw)
@@ -547,6 +551,16 @@ async def handler(ws: WebSocketServerProtocol) -> None:
     finally:
         connected.discard(ws)
         log.info("client disconnected (%d total)", len(connected))
+        # Stop the sim when the last client leaves — no point running with nobody watching
+        if not connected:
+            if _sim_task and not _sim_task.done():
+                log.info("all clients disconnected — stopping outbound sim")
+                _sim_task.cancel()
+                try:
+                    await _sim_task
+                except asyncio.CancelledError:
+                    pass
+            _sim_task = None
 
 
 # ---------------------------------------------------------------------------
