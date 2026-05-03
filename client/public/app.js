@@ -318,9 +318,13 @@ function connectWebSocket() {
   };
 }
 
+function normalizeTarget(t) {
+  return (t && t.id != null) ? { ...t, id: String(t.id) } : t;
+}
+
 function handleMessage(msg) {
   if (msg.status === 'success' && msg.action === 'list') {
-    repo.reset(msg.data || []);
+    repo.reset((msg.data || []).map(normalizeTarget));
     for (const t of repo.list()) {
       const loc = t.tracking_location || {};
       setDisplayPosition(t.id, (loc.longitude || 0) / 1e7, (loc.latitude || 0) / 1e7);
@@ -331,26 +335,28 @@ function handleMessage(msg) {
   }
 
   if (msg.event === 'target_created') {
-    if (!repo.upsert(msg.data)) return;
-    const loc = msg.data.tracking_location || {};
-    setDisplayPosition(msg.data.id, (loc.longitude || 0) / 1e7, (loc.latitude || 0) / 1e7);
+    const t = normalizeTarget(msg.data);
+    if (!repo.upsert(t)) return;
+    const loc = t.tracking_location || {};
+    setDisplayPosition(t.id, (loc.longitude || 0) / 1e7, (loc.latitude || 0) / 1e7);
     rebuildSource();
     renderList();
-    if (selectedId === msg.data.id) renderPopup(msg.data);
+    if (selectedId === t.id) renderPopup(t);
     return;
   }
 
   if (msg.event === 'target_updated') {
-    if (!repo.upsert(msg.data)) return;
-    const loc = msg.data.tracking_location || {};
-    animateToPosition(msg.data.id, (loc.longitude || 0) / 1e7, (loc.latitude || 0) / 1e7);
+    const t = normalizeTarget(msg.data);
+    if (!repo.upsert(t)) return;
+    const loc = t.tracking_location || {};
+    animateToPosition(t.id, (loc.longitude || 0) / 1e7, (loc.latitude || 0) / 1e7);
     renderList();
-    if (selectedId === msg.data.id) renderPopup(msg.data);
+    if (selectedId === t.id) renderPopup(t);
     return;
   }
 
   if (msg.event === 'target_deleted') {
-    const id = msg.data.id;
+    const id = String(msg.data.id);
     repo.delete(id);
     displayPositions.delete(id);
     activeAnimations.delete(id);
@@ -483,10 +489,10 @@ function renderList() {
 
   container.querySelectorAll('.state-badge-wrap').forEach(wrap => {
     wrap.addEventListener('click', (e) => {
-      e.stopPropagation();
+      e.stopPropagation(); // still stop propagation to card so we don't double-fly
       const id = wrap.dataset.id;
       activeDropdownId = activeDropdownId === id ? null : id;
-      renderList();
+      selectTarget(id, true);
     });
   });
 
@@ -617,11 +623,11 @@ function formatAge(unixSeconds) {
 
 function selectTarget(id, flyTo) {
   if (selectedId && selectedId !== id) {
-    map.setFeatureState({ source: SOURCE_ID, id: selectedId }, { selected: false });
+    try { map.setFeatureState({ source: SOURCE_ID, id: selectedId }, { selected: false }); } catch (_) {}
   }
 
   selectedId = id;
-  map.setFeatureState({ source: SOURCE_ID, id }, { selected: true });
+  try { map.setFeatureState({ source: SOURCE_ID, id }, { selected: true }); } catch (_) {}
   renderList();
 
   const t = repo.get(id);
@@ -633,7 +639,7 @@ function selectTarget(id, flyTo) {
     const lng = display ? display.lng : (loc.longitude || 0) / 1e7;
     const lat = display ? display.lat : (loc.latitude  || 0) / 1e7;
     if (lng !== 0 || lat !== 0) {
-      map.flyTo({ center: [lng, lat], zoom: Math.max(map.getZoom(), 14), duration: 800 });
+      map.flyTo({ center: [lng, lat], zoom: map.getZoom(), duration: 800, pitch: map.getPitch(), bearing: map.getBearing() });
     }
   }
 

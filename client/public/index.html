@@ -11,6 +11,15 @@
 <body>
   <div id="app">
     <aside id="sidebar">
+      <div id="pip-container">
+        <div id="pip-header">
+          <span id="pip-title">RTMS FEED</span>
+          <span id="pip-status" class="pip-status-connecting">CONNECTING</span>
+          <button id="pip-toggle">▼</button>
+        </div>
+        <canvas id="pip-canvas"></canvas>
+      </div>
+
       <div id="sidebar-header">
         <span id="sidebar-title">TRACKER</span>
         <span id="connection-status" class="status-disconnected">DISCONNECTED</span>
@@ -22,8 +31,10 @@
       <div id="sidebar-toolbar">
         <button id="populate-btn">+ POPULATE</button>
       </div>
-      <div id="target-list"></div>
-      <div id="asset-list" style="display:none"></div>
+      <div id="list-area">
+        <div id="target-list"></div>
+        <div id="asset-list" style="display:none"></div>
+      </div>
 
       <div id="messages-section">
         <div id="messages-header">
@@ -46,14 +57,6 @@
       <button id="sim-btn">SIM</button>
       <button id="out-sim-btn">OUT SIM</button>
 
-      <div id="pip-container">
-        <div id="pip-header">
-          <span id="pip-title">RTMS FEED</span>
-          <span id="pip-status" class="pip-status-connecting">CONNECTING</span>
-          <button id="pip-toggle">▼</button>
-        </div>
-        <canvas id="pip-canvas"></canvas>
-      </div>
     </div>
   </div>
 
