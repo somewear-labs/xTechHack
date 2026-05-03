@@ -63,7 +63,7 @@ def bytestring_to_target_dict(data: bytes) -> dict:
     upd = proto.updated_date
 
     return {
-        "id": proto.id or str(uuid.uuid4()),
+        "id": proto.id,
         "updated_date": {
             "seconds": upd.seconds,
             "nanos":   upd.nanos,
