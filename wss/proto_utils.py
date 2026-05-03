@@ -49,7 +49,7 @@ def target_dict_to_bytestring(target: dict) -> bytes:
             courseOverGround=loc.get("course_over_ground", 0),
         ),
         state=_STATE_TO_ENUM.get(state_str, TARGET_STATE_UNKNOWN),
-        workspace_id=target.get("workspace_id", ""),
+        workspace_id=numeric_wsid,
     )
     return proto.SerializeToString()
 
