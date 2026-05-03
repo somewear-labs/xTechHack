@@ -10,9 +10,9 @@
   --tertiary-accent: #1EB982;
   --secondary-accent: #F8C100;
   --error: #E4591D;
-  --surface: rgba(10, 12, 15, 0.82);
-  --surface-elevated: rgba(20, 23, 27, 0.85);
-  --surface-card: rgba(30, 34, 38, 0.88);
+  --surface: rgba(4, 8, 18, 0.93);
+  --surface-elevated: rgba(8, 14, 28, 0.93);
+  --surface-card: rgba(14, 20, 36, 0.93);
   --surface-separator: rgba(55, 62, 70, 0.9);
   --primary-on-surface: #FFFFFF;
   --secondary-on-surface: rgba(255,255,255,0.7);
@@ -38,14 +38,16 @@ html, body {
 
 #sidebar {
   position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
+  left: 12px;
+  top: 12px;
+  bottom: 12px;
   width: 33vw;
   background: transparent;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--surface-separator);
+  border: 1px solid var(--surface-separator);
+  border-radius: 8px;
+  overflow: hidden;
   z-index: 10;
 }
 
@@ -97,7 +99,8 @@ html, body {
 }
 
 #target-list,
-#asset-list {
+#asset-list,
+#message-list {
   flex: 1;
   overflow-y: auto;
   padding: 8px 0;
@@ -105,17 +108,20 @@ html, body {
 }
 
 #target-list::-webkit-scrollbar,
-#asset-list::-webkit-scrollbar {
+#asset-list::-webkit-scrollbar,
+#message-list::-webkit-scrollbar {
   width: 4px;
 }
 
 #target-list::-webkit-scrollbar-track,
-#asset-list::-webkit-scrollbar-track {
+#asset-list::-webkit-scrollbar-track,
+#message-list::-webkit-scrollbar-track {
   background: transparent;
 }
 
 #target-list::-webkit-scrollbar-thumb,
-#asset-list::-webkit-scrollbar-thumb {
+#asset-list::-webkit-scrollbar-thumb,
+#message-list::-webkit-scrollbar-thumb {
   background: var(--surface-separator);
   border-radius: 2px;
 }
@@ -195,14 +201,41 @@ html, body {
   gap: 12px;
 }
 
-.target-thumb {
-  width: 36px;
-  height: 64px;
-  object-fit: cover;
+.target-thumb-wrap {
+  position: relative;
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.target-thumb {
+  width: 72px;
+  height: 128px;
+  object-fit: cover;
   display: block;
   border: 1px solid rgba(34, 111, 238, 0.35);
+  border-bottom: none;
   background: #000;
+}
+
+.target-class-tag {
+  display: block;
+  width: 72px;
+  box-sizing: border-box;
+  text-align: center;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #a8d4ff;
+  background: rgba(34, 111, 238, 0.28);
+  border: 1px solid rgba(34, 111, 238, 0.35);
+  border-top: none;
+  padding: 2px 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .target-card:hover {
@@ -218,6 +251,9 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 5px;
+  flex: 1;
+  min-width: 0;
+  padding-right: 10px;
 }
 
 .target-row {
@@ -366,62 +402,22 @@ html, body {
 
 /* ── Messages section ────────────────────────── */
 
-#messages-section {
-  flex-shrink: 0;
-  height: 220px;
-  display: flex;
-  flex-direction: column;
-  background: var(--surface);
-  border-top: 1px solid var(--surface-separator);
-}
-
-#messages-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 16px 8px;
-  flex-shrink: 0;
-}
-
-#messages-title {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 1.5px;
-  color: var(--secondary-on-surface);
-}
-
 .messages-unread {
-  font-size: 10px;
+  display: inline-block;
+  font-size: 9px;
   font-weight: 700;
   background: var(--primary-accent);
   color: #fff;
   border-radius: 8px;
-  padding: 1px 6px;
-  min-width: 18px;
+  padding: 1px 5px;
+  margin-left: 4px;
+  vertical-align: middle;
+  min-width: 16px;
   text-align: center;
 }
 
 .messages-unread.hidden {
   display: none;
-}
-
-#message-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 0 0 8px;
-}
-
-#message-list::-webkit-scrollbar {
-  width: 4px;
-}
-
-#message-list::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-#message-list::-webkit-scrollbar-thumb {
-  background: var(--surface-separator);
-  border-radius: 2px;
 }
 
 .message-row {
@@ -599,7 +595,7 @@ html, body {
 #overlay-panel {
   position: absolute;
   z-index: 16;
-  width: 272px;
+  width: 340px;
   background: rgba(4, 8, 18, 0.93);
   border: 1px solid rgba(34, 111, 238, 0.32);
   box-shadow: 0 0 32px rgba(34, 111, 238, 0.12), inset 0 1px 0 rgba(34, 111, 238, 0.08);
@@ -620,14 +616,14 @@ html, body {
 .ol-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 12px 9px;
+  gap: 10px;
+  padding: 14px 16px 12px;
   border-bottom: 1px solid rgba(34, 111, 238, 0.18);
 }
 
 .ol-title {
   flex: 1;
-  font-size: 11px;
+  font-size: 14px;
   font-weight: 700;
   letter-spacing: 1px;
   color: #fff;
@@ -638,7 +634,7 @@ html, body {
 }
 
 .ol-state-badge {
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.5px;
   flex-shrink: 0;
@@ -665,18 +661,18 @@ html, body {
 }
 
 .ol-data {
-  padding: 8px 12px 4px;
+  padding: 10px 16px 6px;
 }
 
 .ol-row {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  padding: 3px 0;
+  padding: 4px 0;
 }
 
 .ol-key {
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: 1px;
   color: rgba(255, 255, 255, 0.28);
@@ -685,7 +681,7 @@ html, body {
 }
 
 .ol-val {
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 500;
   color: rgba(255, 255, 255, 0.85);
   font-variant-numeric: tabular-nums;
@@ -699,19 +695,19 @@ html, body {
 }
 
 .ol-state-label {
-  font-size: 8px;
+  font-size: 9px;
   font-weight: 700;
   letter-spacing: 1.5px;
   color: rgba(255, 255, 255, 0.28);
-  padding: 6px 12px 4px;
+  padding: 8px 16px 5px;
   font-family: var(--font);
 }
 
 .ol-state-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 4px;
-  padding: 0 12px 12px;
+  gap: 5px;
+  padding: 0 16px 16px;
 }
 
 .ol-state-btn {
@@ -738,6 +734,62 @@ html, body {
 
 .ol-state-btn:hover {
   background: rgba(255, 255, 255, 0.1) !important;
+}
+
+/* ── Proto target map markers (Android box style) */
+
+.proto-marker {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.pm-box {
+  width: 44px;
+  height: 44px;
+  border: 2px solid #fff;
+  background: transparent;
+  position: relative;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.pm-box.pm-selected {
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.35), 0 0 12px rgba(255,255,255,0.25);
+}
+
+.pm-corner {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+}
+
+.pm-tl { top: -3px;    left: -3px; }
+.pm-tr { top: -3px;    right: -3px; }
+.pm-bl { bottom: -3px; left: -3px; }
+.pm-br { bottom: -3px; right: -3px; }
+
+.pm-dot {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #FF3333;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.pm-label {
+  margin-top: 3px;
+  font-family: var(--font);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-shadow: 1px 1px 3px #000, 0 0 6px #000;
+  white-space: nowrap;
 }
 
 /* ── Mapbox overrides ─────────────────────────── */
@@ -869,7 +921,7 @@ html, body {
   gap: 8px;
   padding: 0 10px;
   height: 32px;
-  background: rgba(42, 45, 49, 0.85);
+  background: rgba(4, 8, 18, 0.93);
   border-bottom: 1px solid var(--surface-separator);
   cursor: default;
   flex-shrink: 0;

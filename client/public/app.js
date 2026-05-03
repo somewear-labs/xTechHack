@@ -23,6 +23,21 @@ const STATE_META = {
 const STATE_COLORS = Object.fromEntries(Object.entries(STATE_META).map(([k, v]) => [k, v.color]));
 const STATE_LABELS = Object.fromEntries(Object.entries(STATE_META).map(([k, v]) => [k, v.label]));
 
+// COCO-80 class names (index = class_id)
+const COCO_CLASSES = [
+  'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat',
+  'traffic light','fire hydrant','stop sign','parking meter','bench','bird','cat',
+  'dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack',
+  'umbrella','handbag','tie','suitcase','frisbee','skis','snowboard','sports ball',
+  'kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket',
+  'bottle','wine glass','cup','fork','knife','spoon','bowl','banana','apple',
+  'sandwich','orange','broccoli','carrot','hot dog','pizza','donut','cake','chair',
+  'couch','potted plant','bed','dining table','toilet','tv','laptop','mouse',
+  'remote','keyboard','cell phone','microwave','oven','toaster','sink',
+  'refrigerator','book','clock','vase','scissors','teddy bear','hair drier',
+  'toothbrush',
+];
+
 const SOURCE_ID    = 'targets-source';
 const LAYER_CIRCLE = 'targets-circle';
 const LAYER_PULSE  = 'targets-pulse';
@@ -48,6 +63,8 @@ let selectedId = null;
 let currentStyle = 'satellite';
 let overlayState = null; // { id, lng, lat, color }
 const targetImages = new Map(); // id → cropped-frame dataURL
+const protoMarkers = new Map(); // id → { marker: mapboxgl.Marker, el: HTMLElement }
+const targetLabels = new Map(); // id → {classId, objectId, label}
 let rtmsCanvas = null;
 const FRAME_BUFFER_SIZE = 60;   // ~4 s at 15 fps
 const frameBuffer = [];         // [{pts_ns, snap}] FIFO, oldest first
@@ -246,6 +263,75 @@ function rebuildSource() {
   const src = map.getSource(SOURCE_ID);
   if (!src) return;
   src.setData({ type: 'FeatureCollection', features: repo.list().map(targetToFeature) });
+  syncMarkers();
+}
+
+// ---------------------------------------------------------------------------
+// Proto target map markers (Android box style)
+// ---------------------------------------------------------------------------
+
+function markerLngLat(t) {
+  const display = displayPositions.get(t.id);
+  const loc = t.tracking_location || {};
+  const lng = display ? display.lng : (loc.longitude || 0) / 1e7;
+  const lat = display ? display.lat : (loc.latitude  || 0) / 1e7;
+  return (lng === 0 && lat === 0) ? null : [lng, lat];
+}
+
+function updateMarkerEl(el, t) {
+  const color = STATE_COLORS[t.state] || '#5F666C';
+  const decoded = targetLabels.get(t.id);
+  const label = decoded
+    ? `${decoded.label.toUpperCase()} #${decoded.objectId}`
+    : (t.label || String(t.id).slice(-4).toUpperCase());
+  const selected = t.id === selectedId;
+  el.innerHTML = `
+    <div class="pm-box${selected ? ' pm-selected' : ''}" style="border-color:${color}">
+      <div class="pm-corner pm-tl" style="background:${color}"></div>
+      <div class="pm-corner pm-tr" style="background:${color}"></div>
+      <div class="pm-corner pm-bl" style="background:${color}"></div>
+      <div class="pm-corner pm-br" style="background:${color}"></div>
+      <div class="pm-dot"></div>
+    </div>
+    <div class="pm-label" style="color:${color}">${label}</div>`;
+}
+
+function syncMarkers() {
+  if (!map.isStyleLoaded()) return;
+  const targets = repo.list();
+  const liveIds = new Set(targets.map(t => String(t.id)));
+
+  for (const [id, { marker }] of protoMarkers) {
+    if (!liveIds.has(id)) { marker.remove(); protoMarkers.delete(id); }
+  }
+
+  for (const t of targets) {
+    const ll = markerLngLat(t);
+    if (!ll) continue;
+    if (protoMarkers.has(t.id)) {
+      const { marker, el } = protoMarkers.get(t.id);
+      marker.setLngLat(ll);
+      updateMarkerEl(el, t);
+    } else {
+      const el = document.createElement('div');
+      el.className = 'proto-marker';
+      updateMarkerEl(el, t);
+      const marker = new mapboxgl.Marker({ element: el, anchor: 'center' })
+        .setLngLat(ll)
+        .addTo(map);
+      el.addEventListener('click', (e) => { e.stopPropagation(); selectTarget(t.id, false); });
+      protoMarkers.set(t.id, { marker, el });
+    }
+  }
+}
+
+function syncMarkerPositions() {
+  for (const t of repo.list()) {
+    const entry = protoMarkers.get(t.id);
+    if (!entry) continue;
+    const ll = markerLngLat(t);
+    if (ll) entry.marker.setLngLat(ll);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -285,7 +371,9 @@ function animationTick(now) {
     if (t >= 1) activeAnimations.delete(id);
     else hasActive = true;
   }
-  rebuildSource();
+  const _src = map.getSource(SOURCE_ID);
+  if (_src) _src.setData({ type: 'FeatureCollection', features: repo.list().map(targetToFeature) });
+  syncMarkerPositions();
   if (hasActive) requestAnimationFrame(animationTick);
 }
 
@@ -362,6 +450,9 @@ function handleMessage(msg) {
     displayPositions.delete(id);
     activeAnimations.delete(id);
     targetImages.delete(id);
+    targetLabels.delete(id);
+    protoMarkers.get(id)?.marker.remove();
+    protoMarkers.delete(id);
     if (selectedId === id) {
       overlayState = null;
       selectedId = null;
@@ -447,6 +538,8 @@ function updateTargetState(id, newState) {
   if (!repo.upsert(updated)) return; // rejected by state machine
   rebuildSource();
   renderList();
+  document.querySelector(`#target-list .target-card[data-id="${id}"]`)
+    ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   if (selectedId === id) renderMapOverlay(updated);
 
   // Emit to server with zeroed coords to signal state-only update
@@ -489,13 +582,23 @@ function renderList() {
     const sel = t.id === selectedId ? ' selected' : '';
     const dropOpen = activeDropdownId === t.id ? ' open' : '';
     const imgUrl = targetImages.get(t.id);
-    const thumbHtml = imgUrl ? `<img class="target-thumb" src="${imgUrl}" alt="">` : '';
+    const decoded = targetLabels.get(t.id);
+    const classTag = decoded ? `<span class="target-class-tag">${decoded.label}</span>` : '';
+    const thumbHtml = imgUrl
+      ? `<div class="target-thumb-wrap"><img class="target-thumb" src="${imgUrl}" alt="">${classTag}</div>`
+      : '';
+    const cardName = decoded
+      ? decoded.label.toUpperCase()
+      : (t.label || (idStr ? idStr.split('-')[0].toUpperCase() : '???'));
+    const cardSubId = decoded
+      ? `#${decoded.objectId}`
+      : (t.label ? 'id: ' + shortId : '');
     return `
       <div class="target-card${sel}" data-id="${t.id}">
         ${thumbHtml}
         <div class="target-main">
           <div class="target-row">
-            <div class="target-id">${displayName}<span class="target-short-id">${t.label ? 'id: ' + shortId : ''}</span></div>
+            <div class="target-id">${cardName}<span class="target-short-id">${cardSubId}</span></div>
             <div class="target-updated">${updated}</div>
           </div>
           <div class="target-row">
@@ -515,7 +618,7 @@ function renderList() {
 
   container.querySelectorAll('.state-badge-wrap').forEach(wrap => {
     wrap.addEventListener('click', (e) => {
-      e.stopPropagation(); // still stop propagation to card so we don't double-fly
+      e.stopPropagation();
       const id = wrap.dataset.id;
       activeDropdownId = activeDropdownId === id ? null : id;
       selectTarget(id, true);
@@ -581,10 +684,14 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     activeTab = btn.dataset.tab;
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b === btn));
-    document.getElementById('target-list').style.display = activeTab === 'targets' ? '' : 'none';
-    document.getElementById('asset-list').style.display  = activeTab === 'assets'  ? '' : 'none';
-    // Also hide toolbar (populate) on assets tab
+    document.getElementById('target-list').style.display  = activeTab === 'targets'  ? '' : 'none';
+    document.getElementById('asset-list').style.display   = activeTab === 'assets'   ? '' : 'none';
+    document.getElementById('message-list').style.display = activeTab === 'messages' ? '' : 'none';
     document.getElementById('sidebar-toolbar').style.display = activeTab === 'targets' ? '' : 'none';
+    if (activeTab === 'messages') {
+      unreadMessages = 0;
+      renderMessages();
+    }
   });
 });
 
@@ -596,16 +703,12 @@ function renderMessages() {
   const container = document.getElementById('message-list');
   const badge = document.getElementById('messages-unread');
 
+  if (activeTab === 'messages') unreadMessages = 0;
+
   if (unreadMessages > 0) {
     badge.textContent = unreadMessages > 99 ? '99+' : unreadMessages;
     badge.classList.remove('hidden');
   } else {
-    badge.classList.add('hidden');
-  }
-
-  const section = document.getElementById('messages-section');
-  if (section.getBoundingClientRect().height > 0) {
-    unreadMessages = 0;
     badge.classList.add('hidden');
   }
 
@@ -648,12 +751,17 @@ function formatAge(unixSeconds) {
 // ---------------------------------------------------------------------------
 
 function selectTarget(id, flyTo) {
-  if (selectedId && selectedId !== id) {
-    try { map.setFeatureState({ source: SOURCE_ID, id: selectedId }, { selected: false }); } catch (_) {}
+  const prevId = selectedId;
+  if (prevId && prevId !== id) {
+    try { map.setFeatureState({ source: SOURCE_ID, id: prevId }, { selected: false }); } catch (_) {}
+    const prev = repo.get(prevId);
+    if (prev) { const e = protoMarkers.get(prevId)?.el; if (e) updateMarkerEl(e, prev); }
   }
 
   selectedId = id;
   try { map.setFeatureState({ source: SOURCE_ID, id }, { selected: true }); } catch (_) {}
+  const cur = repo.get(id);
+  if (cur) { const e = protoMarkers.get(id)?.el; if (e) updateMarkerEl(e, cur); }
   renderList();
 
   const t = repo.get(id);
@@ -713,13 +821,7 @@ function renderMapOverlay(t) {
   const lat = (loc.latitude  || 0) / 1e7;
   if (lng === 0 && lat === 0) return;
 
-  const meta     = STATE_META[t.state] || STATE_META.TARGET_STATE_UNKNOWN;
-  const altM     = ((loc.altitude || 0) / 1000).toFixed(0);
-  const speedKph = ((loc.speed_over_ground || 0) * 0.0036).toFixed(1);
-  const course   = ((loc.course_over_ground || 0) / 1000).toFixed(0);
-  const updated  = t.updated_date
-    ? new Date((t.updated_date.seconds || 0) * 1000).toLocaleTimeString()
-    : '--';
+  const meta = STATE_META[t.state] || STATE_META.TARGET_STATE_UNKNOWN;
 
   const statePicker = Object.entries(STATE_META).map(([key, m]) => {
     const active   = t.state === key;
@@ -741,10 +843,6 @@ function renderMapOverlay(t) {
     </div>
     <div class="ol-data">
       <div class="ol-row"><span class="ol-key">LAT / LNG</span><span class="ol-val">${lat.toFixed(5)},&thinsp;${lng.toFixed(5)}</span></div>
-      <div class="ol-row"><span class="ol-key">ALT</span><span class="ol-val">${altM} m</span></div>
-      <div class="ol-row"><span class="ol-key">SPEED</span><span class="ol-val">${speedKph} km/h</span></div>
-      <div class="ol-row"><span class="ol-key">COURSE</span><span class="ol-val">${course}°</span></div>
-      <div class="ol-row"><span class="ol-key">UPDATED</span><span class="ol-val">${updated}</span></div>
     </div>
     <div class="ol-divider"></div>
     <div class="ol-state-label">SET STATE</div>
@@ -977,21 +1075,26 @@ function findFrame(pts_ns) {
 
 function cropBboxFromCanvas(srcCanvas, bx, by, bw, bh) {
   if (!srcCanvas || bw <= 0 || bh <= 0) return null;
-  const pad = 0.5; // expand each side by 50% of the bbox dimension
-  const pbx = bx - bw * pad;
-  const pby = by - bh * pad;
-  const pbw = bw * (1 + pad * 2);
-  const pbh = bh * (1 + pad * 2);
   const scaleX = srcCanvas.width  / 1280;
   const scaleY = srcCanvas.height / 720;
-  const sx = Math.max(0, Math.round(pbx * scaleX));
-  const sy = Math.max(0, Math.round(pby * scaleY));
-  const sw = Math.max(1, Math.min(Math.round(pbw * scaleX), srcCanvas.width  - sx));
-  const sh = Math.max(1, Math.min(Math.round(pbh * scaleY), srcCanvas.height - sy));
+  const sx = Math.max(0, Math.round(bx * scaleX));
+  const sy = Math.max(0, Math.round(by * scaleY));
+  const sw = Math.max(1, Math.min(Math.round(bw * scaleX), srcCanvas.width  - sx));
+  const sh = Math.max(1, Math.min(Math.round(bh * scaleY), srcCanvas.height - sy));
   const off = document.createElement('canvas');
   off.width = sw; off.height = sh;
   off.getContext('2d').drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
   try { return off.toDataURL('image/jpeg', 0.82); } catch { return null; }
+}
+
+// Decode proto target id: ((class_id + 1) << 32) | object_id
+function decodeProtoId(id) {
+  const n = Number(id);
+  if (!Number.isFinite(n) || n < 0x100000000) return null;
+  const classId = Math.floor(n / 0x100000000) - 1;
+  const objectId = Math.round(n % 0x100000000);
+  const label = COCO_CLASSES[classId] ?? `class_${classId}`;
+  return { classId, objectId, label };
 }
 
 // Match a frame_detection bbox [x,y,w,h] to the closest proto target by bbox center distance.
@@ -1023,6 +1126,8 @@ function handleFrameDetection(data) {
     const targetId = matchDetectionToTarget(det.bbox);
     if (targetId) {
       targetImages.set(targetId, img);
+      const decoded = decodeProtoId(targetId);
+      if (decoded) targetLabels.set(targetId, decoded);
       updated = true;
     }
   }

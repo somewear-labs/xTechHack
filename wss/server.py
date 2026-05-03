@@ -643,7 +643,10 @@ async def handler(ws: WebSocketServerProtocol) -> None:
             action = msg.get("action")
             payload = msg.get("payload")
 
-            log.info("recv << %s", raw)
+            if action == "publish" and (payload or {}).get("event") == "frame_detection":
+                log.debug("recv << frame_detection (suppressed)")
+            else:
+                log.info("recv << %s", raw)
 
             fn = HANDLERS.get(action)
             if fn is None:
