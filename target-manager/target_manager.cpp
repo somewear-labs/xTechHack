@@ -197,10 +197,17 @@ void TargetManager::post_target(const Target &t) {
     loc->set_latitude (static_cast<std::int32_t>(t.latitude  * 1e7));
     loc->set_longitude(static_cast<std::int32_t>(t.longitude * 1e7));
     loc->set_timestamp(static_cast<std::uint32_t>(t.last_seen ? t.last_seen : now_unix_seconds()));
-    msg.set_state(::TARGET_STATE_ACTIVE);
+    msg.set_state(::TARGET_STATE_UNKNOWN);
     if (!beam_workspace_.empty()) {
         try { msg.set_workspace_id(std::stoull(beam_workspace_)); } catch (...) {}
     }
+    // Pack bbox as four uint16 fields: (left<<48) | (top<<32) | (width<<16) | height.
+    std::uint64_t bbox_packed =
+        (static_cast<std::uint64_t>(static_cast<std::uint16_t>(t.bbox_left))   << 48) |
+        (static_cast<std::uint64_t>(static_cast<std::uint16_t>(t.bbox_top))    << 32) |
+        (static_cast<std::uint64_t>(static_cast<std::uint16_t>(t.bbox_width))  << 16) |
+         static_cast<std::uint64_t>(static_cast<std::uint16_t>(t.bbox_height));
+    msg.set_bbox(bbox_packed);
 
     std::string proto_bytes;
     if (!msg.SerializeToString(&proto_bytes)) {
@@ -300,6 +307,10 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
                     it->second->latitude  = gp->latitude;
                     it->second->longitude = gp->longitude;
                 }
+                it->second->bbox_left   = bb.left;
+                it->second->bbox_top    = bb.top;
+                it->second->bbox_width  = bb.width;
+                it->second->bbox_height = bb.height;
                 it->second->last_seen = now_unix_seconds();
                 it->second->dirty     = true;
             }

@@ -54,6 +54,9 @@ message TargetResponse {
     TrackingLocationDto tracking_location = 3;
     TargetState state = 4;
     uint64 workspace_id = 5;
+    // Pixel-space bbox at source resolution (1280x720), packed as four
+    // uint16 fields: (left << 48) | (top << 32) | (width << 16) | height.
+    fixed64 bbox = 6;
 }
 
 message TargetResponseList {

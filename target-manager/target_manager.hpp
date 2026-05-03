@@ -34,8 +34,17 @@ struct Target {
     std::int64_t last_seen = 0;   // unix seconds; 0 = never sent / never seen
     bool    dirty          = false;
 
+    // Latest bbox in pixel space at source resolution (1280x720).
+    float bbox_left   = 0.0f;
+    float bbox_top    = 0.0f;
+    float bbox_width  = 0.0f;
+    float bbox_height = 0.0f;
+
     Target(int class_id, std::uint64_t obj_id) {
-        this->id = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(class_id)) << 32) ^ obj_id;
+        // (class_id + 1) in high 32 bits guarantees high half >= 1, so id is
+        // never 0 even when class_id=0 and obj_id=0. Receiver recovers the
+        // original class with `(id >> 32) - 1`.
+        this->id = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(class_id) + 1) << 32) | obj_id;
     }
 };
 
