@@ -977,12 +977,17 @@ function findFrame(pts_ns) {
 
 function cropBboxFromCanvas(srcCanvas, bx, by, bw, bh) {
   if (!srcCanvas || bw <= 0 || bh <= 0) return null;
+  const pad = 0.5; // expand each side by 50% of the bbox dimension
+  const pbx = bx - bw * pad;
+  const pby = by - bh * pad;
+  const pbw = bw * (1 + pad * 2);
+  const pbh = bh * (1 + pad * 2);
   const scaleX = srcCanvas.width  / 1280;
   const scaleY = srcCanvas.height / 720;
-  const sx = Math.round(bx * scaleX);
-  const sy = Math.round(by * scaleY);
-  const sw = Math.max(1, Math.round(bw * scaleX));
-  const sh = Math.max(1, Math.round(bh * scaleY));
+  const sx = Math.max(0, Math.round(pbx * scaleX));
+  const sy = Math.max(0, Math.round(pby * scaleY));
+  const sw = Math.max(1, Math.min(Math.round(pbw * scaleX), srcCanvas.width  - sx));
+  const sh = Math.max(1, Math.min(Math.round(pbh * scaleY), srcCanvas.height - sy));
   const off = document.createElement('canvas');
   off.width = sw; off.height = sh;
   off.getContext('2d').drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
