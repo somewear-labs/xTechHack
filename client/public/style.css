@@ -192,13 +192,20 @@ html, body {
 /* ── Target cards ────────────────────────────── */
 
 .target-card {
-  padding: 14px 14px 14px 18px;
+  padding: 12px 14px;
   border-bottom: 1px solid var(--surface-separator);
   cursor: pointer;
   transition: background 0.15s;
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
+  align-items: center;
+  gap: 10px;
+}
+
+.target-dot {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
 }
 
 .target-thumb-wrap {
@@ -243,7 +250,6 @@ html, body {
 
 .target-card.selected {
   background: rgba(34, 111, 238, 0.12);
-  border-left: 2px solid var(--primary-accent);
 }
 
 .target-main {

@@ -236,12 +236,19 @@ function emptyFeatureCollection() {
   return { type: 'FeatureCollection', features: [] };
 }
 
+function targetDisplayId(id) {
+  const s = id != null ? String(id) : '';
+  return (s !== '' && Number.isFinite(Number(s)) && !s.includes('-'))
+    ? `ID ${s}`
+    : (s ? s.split('-')[0].toUpperCase() : '???');
+}
+
 function targetToFeature(t) {
   const display = displayPositions.get(t.id);
   const loc = t.tracking_location || {};
   const lng = display ? display.lng : (loc.longitude  || 0) / 1e7;
   const lat = display ? display.lat : (loc.latitude   || 0) / 1e7;
-  const shortId = t.label || (t.id ? t.id.split('-')[0].toUpperCase() : '???');
+  const shortId = targetDisplayId(t.id);
   return {
     type: 'Feature',
     id: t.id,
@@ -280,10 +287,7 @@ function markerLngLat(t) {
 
 function updateMarkerEl(el, t) {
   const color = STATE_COLORS[t.state] || '#5F666C';
-  const decoded = targetLabels.get(t.id);
-  const label = decoded
-    ? `${decoded.label.toUpperCase()} #${decoded.objectId}`
-    : (t.label || String(t.id).slice(-4).toUpperCase());
+  const label = targetDisplayId(t.id);
   const selected = t.id === selectedId;
   el.innerHTML = `
     <div class="pm-box${selected ? ' pm-selected' : ''}" style="border-color:${color}">
@@ -576,9 +580,8 @@ function renderList() {
 
   container.innerHTML = list.map(t => {
     const loc = t.tracking_location || {};
-    const lng = ((loc.longitude || 0) / 1e7).toFixed(4);
-    const lat = ((loc.latitude  || 0) / 1e7).toFixed(4);
-    const idStr = t.id != null ? String(t.id) : '';
+    const lng = ((loc.longitude || 0) / 1e7).toFixed(5);
+    const lat = ((loc.latitude  || 0) / 1e7).toFixed(5);
     const updSecs = (t.updated_date || {}).seconds || 0;
     const updated = updSecs ? new Date(updSecs * 1000).toLocaleTimeString() : '';
     const sel = t.id === selectedId ? ' selected' : '';
@@ -587,14 +590,15 @@ function renderList() {
     const thumbHtml = imgUrl
       ? `<div class="target-thumb-wrap"><img class="target-thumb" src="${imgUrl}" alt=""></div>`
       : '';
-    const cardName = t.label || (idStr ? idStr.split('-')[0].toUpperCase() : '???');
-    const cardSubId = t.label ? 'id: ' + idStr : '';
+    const cardName = targetDisplayId(t.id);
+    const dotColor = (STATE_META[t.state] || STATE_META.TARGET_STATE_UNKNOWN).color;
     return `
       <div class="target-card${sel}" data-id="${t.id}">
+        <span class="target-dot" style="background:${dotColor}"></span>
         ${thumbHtml}
         <div class="target-main">
           <div class="target-row">
-            <div class="target-id">${cardName}<span class="target-short-id">${cardSubId}</span></div>
+            <div class="target-id">${cardName}</div>
             <div class="target-updated">${updated}</div>
           </div>
           <div class="target-row">
@@ -833,7 +837,7 @@ function renderMapOverlay(t) {
   if (!inner) return;
   inner.innerHTML = `
     <div class="ol-header">
-      <span class="ol-title">${t.label || t.id}</span>
+      <span class="ol-title">${targetDisplayId(t.id)}</span>
       <span class="ol-state-badge" style="color:${meta.color}">${meta.icon} ${meta.short}</span>
       <button class="ol-close" onclick="closeMapOverlay()">✕</button>
     </div>
