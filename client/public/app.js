@@ -587,8 +587,11 @@ function renderList() {
     const thumbHtml = imgUrl
       ? `<div class="target-thumb-wrap"><img class="target-thumb" src="${imgUrl}" alt=""></div>`
       : '';
-    const cardName = t.label || (idStr ? idStr.split('-')[0].toUpperCase() : '???');
-    const cardSubId = t.label ? 'id: ' + idStr : '';
+    const decoded = targetLabels.get(idStr);
+    const cardName = decoded
+      ? `${decoded.label.toUpperCase()} #${decoded.objectId}`
+      : (t.label || (idStr ? idStr.split('-')[0].toUpperCase() : '???'));
+    const cardSubId = decoded ? `id: ${idStr}` : (t.label ? 'id: ' + idStr : '');
     return `
       <div class="target-card${sel}" data-id="${t.id}">
         ${thumbHtml}
@@ -1083,11 +1086,13 @@ function cropBboxFromCanvas(srcCanvas, bx, by, bw, bh) {
   try { return off.toDataURL('image/jpeg', 0.82); } catch { return null; }
 }
 
-// Decode proto target id: (category << 8) | track_number, both 8-bit lanes.
+// Decode proto target id: ((category+1) << 8) | track_number. C++ side adds
+// +1 to the class lane so the packed id is never 0 (proto3 omits zero-valued
+// scalars on the wire). Subtract it back here to land on the COCO index.
 function decodeProtoId(id) {
   const n = Number(id);
   if (!Number.isFinite(n) || n < 0) return null;
-  const classId  = (n >> 8) & 0xFF;
+  const classId  = ((n >> 8) & 0xFF) - 1;
   const objectId = n & 0xFF;
   const label = COCO_CLASSES[classId] ?? `class_${classId}`;
   return { classId, objectId, label };
