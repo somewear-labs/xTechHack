@@ -96,10 +96,13 @@ TARGET_STATES = {
 # In-memory store: { id -> target_dict }
 targets: dict[str, dict] = {}
 
+# Beam Location events land here, not in targets
+assets: dict[str, dict] = {}
+
 # All connected websocket clients
 connected: set[WebSocketServerProtocol] = set()
 
-# Beam identity_id → target id (for create-or-update on ingest)
+# Beam identity_id → asset id (for create-or-update on ingest)
 identity_targets: dict[str, str] = {}
 
 
@@ -148,11 +151,12 @@ def build_target(payload: dict) -> tuple[dict | None, str | None]:
         return None, err
 
     return {
-        "id": str(uuid.uuid4()),
+        "id": payload.get("id") or str(uuid.uuid4()),
         "updated_date": now_timestamp(),
         "tracking_location": payload.get("tracking_location") or {},
         "state": payload.get("state", "TARGET_STATE_UNKNOWN"),
         "workspace_id": payload.get("workspace_id", ""),
+        "label": payload.get("label", ""),
     }, None
 
 
@@ -319,6 +323,10 @@ async def handle_list(_ws: WebSocketServerProtocol, payload: Any) -> str:
     return ok("list", result)
 
 
+async def handle_list_assets(_ws: WebSocketServerProtocol, _payload: Any) -> str:
+    return ok("list_assets", list(assets.values()))
+
+
 async def handle_update(ws: WebSocketServerProtocol, payload: Any) -> str:
     if not isinstance(payload, dict) or "id" not in payload:
         return err("update", "payload must contain 'id'")
@@ -412,27 +420,26 @@ async def handle_beam_event(ws: WebSocketServerProtocol, payload: Any) -> str:
                 }
 
                 existing_id = identity_targets.get(identity_id)
-                if existing_id and existing_id in targets:
-                    target = targets[existing_id]
-                    target["tracking_location"] = tracking_location
-                    target["state"]             = "TARGET_STATE_ACTIVE"
-                    target["updated_date"]      = now_timestamp()
-                    log.info("beam_event: updated target %s for identity %s", existing_id, identity_id)
-                    await broadcast("target_updated", target, exclude=ws)
+                if existing_id and existing_id in assets:
+                    asset = assets[existing_id]
+                    asset["tracking_location"] = tracking_location
+                    asset["updated_date"]      = now_timestamp()
+                    log.info("beam_event: updated asset %s for identity %s", existing_id, identity_id)
+                    await broadcast("asset_updated", asset, exclude=ws)
+                    target = asset
                 else:
                     target = {
                         "id":                str(uuid.uuid4()),
                         "updated_date":      now_timestamp(),
                         "tracking_location": tracking_location,
-                        "state":             "TARGET_STATE_ACTIVE",
                         "workspace_id":      workspace_id,
                         "label":             identity_name,
                         "beam_identity_id":  identity_id,
                     }
-                    targets[target["id"]] = target
+                    assets[target["id"]] = target
                     identity_targets[identity_id] = target["id"]
-                    log.info("beam_event: created target %s for identity %s", target["id"], identity_id)
-                    await broadcast("target_created", target, exclude=ws)
+                    log.info("beam_event: created asset %s for identity %s", target["id"], identity_id)
+                    await broadcast("asset_created", target, exclude=ws)
 
                 upserted.append(target)
 
@@ -469,14 +476,15 @@ async def handle_beam_event(ws: WebSocketServerProtocol, payload: Any) -> str:
 
 
 HANDLERS = {
-    "create":     handle_create,
-    "get":        handle_get,
-    "list":       handle_list,
-    "update":     handle_update,
-    "delete":     handle_delete,
-    "beam_event": handle_beam_event,
-    "sim_start":  handle_sim_start,
-    "sim_stop":   handle_sim_stop,
+    "create":      handle_create,
+    "get":         handle_get,
+    "list":        handle_list,
+    "list_assets": handle_list_assets,
+    "update":      handle_update,
+    "delete":      handle_delete,
+    "beam_event":  handle_beam_event,
+    "sim_start":   handle_sim_start,
+    "sim_stop":    handle_sim_stop,
 }
 
 

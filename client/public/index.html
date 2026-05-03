@@ -12,10 +12,18 @@
   <div id="app">
     <aside id="sidebar">
       <div id="sidebar-header">
-        <span id="sidebar-title">TARGETS</span>
+        <span id="sidebar-title">TRACKER</span>
         <span id="connection-status" class="status-disconnected">DISCONNECTED</span>
       </div>
+      <div id="sidebar-tabs">
+        <button class="tab-btn active" data-tab="targets">TARGETS</button>
+        <button class="tab-btn" data-tab="assets">ASSETS</button>
+      </div>
+      <div id="sidebar-toolbar">
+        <button id="populate-btn">+ POPULATE</button>
+      </div>
       <div id="target-list"></div>
+      <div id="asset-list" style="display:none"></div>
 
       <div id="messages-section">
         <div id="messages-header">
