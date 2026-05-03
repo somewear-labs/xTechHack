@@ -211,6 +211,14 @@ html, body {
   min-width: 0;
 }
 
+.target-short-id {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--tertiary-on-surface);
+  letter-spacing: 0;
+  margin-left: 5px;
+}
+
 .target-coords {
   font-size: 10px;
   color: var(--tertiary-on-surface);

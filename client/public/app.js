@@ -452,15 +452,18 @@ function renderList() {
     const loc = t.tracking_location || {};
     const lng = ((loc.longitude || 0) / 1e7).toFixed(4);
     const lat = ((loc.latitude  || 0) / 1e7).toFixed(4);
-    const displayName = t.label || (t.id ? t.id.split('-')[0].toUpperCase() : '???');
-    const updated = formatAge((t.updated_date || {}).seconds || 0);
+    const idStr = t.id != null ? String(t.id) : '';
+    const displayName = t.label || (idStr ? idStr.split('-')[0].toUpperCase() : '???');
+    const shortId = idStr ? idStr.split('-')[0].toUpperCase() : '';
+    const updSecs = (t.updated_date || {}).seconds || 0;
+    const updated = updSecs ? new Date(updSecs * 1000).toLocaleTimeString() : '';
     const sel = t.id === selectedId ? ' selected' : '';
     const dropOpen = activeDropdownId === t.id ? ' open' : '';
     return `
       <div class="target-card${sel}" data-id="${t.id}">
         <div class="target-main">
           <div class="target-row">
-            <div class="target-id">${displayName}</div>
+            <div class="target-id">${displayName}<span class="target-short-id">${t.label ? 'id: ' + shortId : ''}</span></div>
             <div class="target-updated">${updated}</div>
           </div>
           <div class="target-row">
@@ -520,7 +523,8 @@ function renderAssets() {
     const lng = ((loc.longitude || 0) / 1e7).toFixed(4);
     const lat = ((loc.latitude  || 0) / 1e7).toFixed(4);
     const name    = a.label || (a.id ? a.id.split('-')[0].toUpperCase() : '???');
-    const updated = formatAge((a.updated_date || {}).seconds || 0);
+    const updSecs = (a.updated_date || {}).seconds || 0;
+    const updated = updSecs ? new Date(updSecs * 1000).toLocaleTimeString() : '';
     return `
       <div class="asset-card">
         <div class="target-main">
