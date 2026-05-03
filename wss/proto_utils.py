@@ -34,6 +34,14 @@ def target_dict_to_bytestring(target: dict, workspace_id: int = 0) -> bytes:
     loc = target.get("tracking_location") or {}
     upd = target.get("updated_date") or {}
     state_str = target.get("state", "TARGET_STATE_UNKNOWN")
+    try:
+        workspace_id = int(target.get("workspace_id") or 0)
+    except (ValueError, TypeError):
+        workspace_id = 0
+    try:
+        target_id = int(target.get("id") or 0)
+    except (ValueError, TypeError):
+        target_id = 0
 
     proto = TargetResponse(
         id=int(target.get("id", 0)),
@@ -70,6 +78,9 @@ def _target_response_to_dict(proto: TargetResponse) -> dict:
         "state":        _ENUM_TO_STATE.get(proto.state, "TARGET_STATE_UNKNOWN"),
         "workspace_id": proto.workspace_id,
     }
+    if proto.bbox:
+        result.update(_unpack_bbox(proto.bbox))
+    return result
 
 
 def bytestring_to_target_dict(data: bytes) -> dict:

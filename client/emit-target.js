@@ -72,6 +72,14 @@ async function emitTarget(TargetResponse, fixedId) {
   const now = Math.floor(Date.now() / 1000);
   const targetId = fixedId || crypto.randomUUID();
 
+  // Mock bbox: a 200x150 box near the centre of a 1280x720 frame.
+  const bboxLeft = 540, bboxTop = 285, bboxWidth = 200, bboxHeight = 150;
+  const bboxPacked =
+    (BigInt(bboxLeft)   << 48n) |
+    (BigInt(bboxTop)    << 32n) |
+    (BigInt(bboxWidth)  << 16n) |
+     BigInt(bboxHeight);
+
   const payload = {
     id: targetId,
     updatedDate: { seconds: now, nanos: 0 },
@@ -85,6 +93,7 @@ async function emitTarget(TargetResponse, fixedId) {
     },
     state:       1, // TARGET_STATE_ACTIVE
     workspaceId: WORKSPACE_ID,
+    bbox:        bboxPacked,
   };
 
   const verifyErr = TargetResponse.verify(payload);
