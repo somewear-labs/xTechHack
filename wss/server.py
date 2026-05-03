@@ -431,6 +431,14 @@ async def handle_list_assets(_ws: WebSocketServerProtocol, _payload: Any) -> str
     return ok("list_assets", list(assets.values()))
 
 
+async def handle_publish(ws: WebSocketServerProtocol, payload: Any) -> str:
+    """Relay a published event to all other connected clients."""
+    if not isinstance(payload, dict) or "event" not in payload:
+        return err("publish", "payload must contain 'event'")
+    await broadcast(payload["event"], payload.get("data"), exclude=ws)
+    return ok("publish", {"event": payload["event"]})
+
+
 async def handle_update(ws: WebSocketServerProtocol, payload: Any) -> str:
     if not isinstance(payload, dict) or "id" not in payload:
         return err("update", "payload must contain 'id'")
@@ -607,6 +615,7 @@ HANDLERS = {
     "beam_event":  handle_beam_event,
     "sim_start":   handle_sim_start,
     "sim_stop":    handle_sim_stop,
+    "publish":     handle_publish,
 }
 
 
@@ -634,8 +643,7 @@ async def handler(ws: WebSocketServerProtocol) -> None:
             action = msg.get("action")
             payload = msg.get("payload")
 
-            if not (action == "publish" and isinstance(payload, dict) and payload.get("event") == "frame_detection"):
-                log.info("recv << %s", raw)
+            log.info("recv << %s", raw)
 
             fn = HANDLERS.get(action)
             if fn is None:

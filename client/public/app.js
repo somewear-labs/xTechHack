@@ -49,6 +49,8 @@ let currentStyle = 'satellite';
 let overlayState = null; // { id, lng, lat, color }
 const targetImages = new Map(); // id → cropped-frame dataURL
 let rtmsCanvas = null;
+const FRAME_BUFFER_SIZE = 60;   // ~4 s at 15 fps
+const frameBuffer = [];         // [{pts_ns, snap}] FIFO, oldest first
 let map;
 let ws;
 let reconnectTimeout;
@@ -338,8 +340,6 @@ function handleMessage(msg) {
     if (!repo.upsert(t)) return;
     const loc = t.tracking_location || {};
     setDisplayPosition(t.id, (loc.longitude || 0) / 1e7, (loc.latitude || 0) / 1e7);
-    const img = cropBboxFromRtms(t);
-    if (img) targetImages.set(t.id, img);
     rebuildSource();
     renderList();
     if (selectedId === t.id) renderMapOverlay(t);
@@ -351,8 +351,6 @@ function handleMessage(msg) {
     if (!repo.upsert(t)) return;
     const loc = t.tracking_location || {};
     animateToPosition(t.id, (loc.longitude || 0) / 1e7, (loc.latitude || 0) / 1e7);
-    const img = cropBboxFromRtms(t);
-    if (img) targetImages.set(t.id, img);
     renderList();
     if (selectedId === t.id) renderMapOverlay(t);
     return;
@@ -401,6 +399,11 @@ function handleMessage(msg) {
     const btn = document.getElementById('out-sim-btn');
     btn.textContent = running ? 'STOP OUT' : 'OUT SIM';
     btn.classList.toggle('active', running);
+    return;
+  }
+
+  if (msg.event === 'frame_detection') {
+    handleFrameDetection(msg.data);
     return;
   }
 
@@ -947,26 +950,78 @@ function toggleOutSim() {
 document.getElementById('out-sim-btn').addEventListener('click', toggleOutSim);
 
 // ---------------------------------------------------------------------------
-// RTMS frame crop
+// RTMS frame buffer + bbox crop
 // ---------------------------------------------------------------------------
 
-function cropBboxFromRtms(t) {
-  if (!rtmsCanvas || !rtmsCanvas.width || !rtmsCanvas.height) return null;
-  const w = t.bbox_width  || 0;
-  const h = t.bbox_height || 0;
-  if (w <= 0 || h <= 0) return null;
-  const scaleX = rtmsCanvas.width  / 1280;
-  const scaleY = rtmsCanvas.height / 720;
-  // bbox width/height are swapped relative to the display frame (portrait vs landscape)
-  const sx = Math.round((t.bbox_left || 0) * scaleX);
-  const sy = Math.round((t.bbox_top  || 0) * scaleY);
-  const sw = Math.max(1, Math.round(h * scaleY));  // use height as width
-  const sh = Math.max(1, Math.round(w * scaleX));  // use width as height
+function captureFrame(pts_ns) {
+  if (!rtmsCanvas || !rtmsCanvas.width || !rtmsCanvas.height) return;
+  const snap = document.createElement('canvas');
+  snap.width  = rtmsCanvas.width;
+  snap.height = rtmsCanvas.height;
+  snap.getContext('2d').drawImage(rtmsCanvas, 0, 0);
+  frameBuffer.push({ pts_ns, snap });
+  if (frameBuffer.length > FRAME_BUFFER_SIZE) frameBuffer.shift();
+}
+
+// Returns the buffered frame with the closest pts_ns, or null if buffer is empty.
+function findFrame(pts_ns) {
+  if (!frameBuffer.length) return null;
+  let best = frameBuffer[0];
+  let bestDiff = Math.abs(frameBuffer[0].pts_ns - pts_ns);
+  for (let i = 1; i < frameBuffer.length; i++) {
+    const diff = Math.abs(frameBuffer[i].pts_ns - pts_ns);
+    if (diff < bestDiff) { bestDiff = diff; best = frameBuffer[i]; }
+  }
+  return best;
+}
+
+function cropBboxFromCanvas(srcCanvas, bx, by, bw, bh) {
+  if (!srcCanvas || bw <= 0 || bh <= 0) return null;
+  const scaleX = srcCanvas.width  / 1280;
+  const scaleY = srcCanvas.height / 720;
+  const sx = Math.round(bx * scaleX);
+  const sy = Math.round(by * scaleY);
+  const sw = Math.max(1, Math.round(bw * scaleX));
+  const sh = Math.max(1, Math.round(bh * scaleY));
   const off = document.createElement('canvas');
-  off.width  = sw;
-  off.height = sh;
-  off.getContext('2d').drawImage(rtmsCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+  off.width = sw; off.height = sh;
+  off.getContext('2d').drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
   try { return off.toDataURL('image/jpeg', 0.82); } catch { return null; }
+}
+
+// Match a frame_detection bbox [x,y,w,h] to the closest proto target by bbox center distance.
+function matchDetectionToTarget(bbox) {
+  const cx = bbox[0] + bbox[2] / 2;
+  const cy = bbox[1] + bbox[3] / 2;
+  let bestId = null, bestDist = Infinity;
+  for (const t of repo.list()) {
+    if (!t.bbox_left && !t.bbox_top) continue;
+    const tx = (t.bbox_left || 0) + (t.bbox_width  || 0) / 2;
+    const ty = (t.bbox_top  || 0) + (t.bbox_height || 0) / 2;
+    const dist = Math.hypot(cx - tx, cy - ty);
+    if (dist < bestDist) { bestDist = dist; bestId = t.id; }
+  }
+  return bestDist < 200 ? bestId : null;
+}
+
+function handleFrameDetection(data) {
+  if (!data) return;
+  console.log('frame_detection', data);
+  const frame = findFrame(data.pts_ns);
+  if (!frame) return;
+
+  let updated = false;
+  for (const det of (data.targets || [])) {
+    const [bx, by, bw, bh] = det.bbox;
+    const img = cropBboxFromCanvas(frame.snap, bx, by, bw, bh);
+    if (!img) continue;
+    const targetId = matchDetectionToTarget(det.bbox);
+    if (targetId) {
+      targetImages.set(targetId, img);
+      updated = true;
+    }
+  }
+  if (updated) renderList();
 }
 
 // ---------------------------------------------------------------------------
@@ -1001,6 +1056,7 @@ function cropBboxFromRtms(t) {
     reconnectInterval: 5,
     onSourceEstablished: () => setPipStatus('live'),
     onSourceCompleted:   () => setPipStatus('connecting'),
+    onVideoDecode: (_decoder, time) => captureFrame(Math.round(time * 1e9)),
   });
 
   toggleBtn.addEventListener('click', () => {
