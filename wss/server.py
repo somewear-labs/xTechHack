@@ -35,6 +35,40 @@ Server → all connected clients (broadcasts):
   { "event": "target_created", "data": <target> }
   { "event": "target_updated", "data": <target> }
   { "event": "target_deleted", "data": { "id": "..." } }
+  { "event": "frame_detection", "data": <per-frame detections — see below> }
+
+--- Per-frame detection stream (frame_detection) ---
+
+Bound to deepstream-app's write_targets_socket UDS at $TARGETS_UDS
+(default /home/swl-jetson-1/swl-vision/run/targets.sock). One datagram per
+inferred batch is broadcast to every connected WS client.
+
+How to subscribe (browser):
+
+    const ws = new WebSocket("ws://<jetson-host>:8000");
+    ws.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.event !== "frame_detection") return;
+        const { frame, pts_ns, ts_us, src, targets } = msg.data;
+        // each target: { id, class_id, label, conf, bbox: [L, T, W, H] }
+        for (const t of targets) {
+            // bbox is in source-resolution pixels (1280x720 for the wyze/android stream).
+            // Scale to your <video> client size and draw on a <canvas> overlay.
+        }
+    };
+
+For frame-accurate sync against the live RTSP stream, use the video element's
+HTMLVideoElement.requestVideoFrameCallback(callback) API and match
+metadata.rtpTimestamp (or mediaTime, plus an offset) against pts_ns. Buffer a
+small ring of frame_detection messages keyed by pts_ns; pop the entry whose
+PTS matches the painted frame.
+
+For dev / quick check from the shell:
+
+    websocat ws://localhost:8000           # subscribe to everything
+    # or: python3 -c "import asyncio,websockets,json; \
+    #     asyncio.run((async def(): ws=await websockets.connect('ws://localhost:8000'); \
+    #     while 1: print(json.loads(await ws.recv())))())"
 """
 
 import asyncio
@@ -58,11 +92,19 @@ from aiohttp import web
 # Outbound Unix-domain SOCK_DGRAM toward target-manager — every Beam Message
 # event's content (base64 of TargetResponse proto bytes) gets b64-decoded and
 # pushed to this socket. target-manager's listener prints/parses raw bytes.
-TM_INBOUND_SOCKET = os.environ.get(
-    "TM_INBOUND_SOCKET",
-    "/home/swl-jetson-1/swl-vision/run/target-manager.sock",
-)
+# Socket paths default to the container layout (/run/swl/...). When running
+# this server on the Jetson host (outside the container) point these env vars
+# at the host-side bind-mount, e.g.
+#   TM_INBOUND_SOCKET=$PWD/swl-vision/run/target-manager.sock
+#   TARGETS_UDS=$PWD/swl-vision/run/targets.sock
+TM_INBOUND_SOCKET = os.environ.get("TM_INBOUND_SOCKET", "/run/swl/target-manager.sock")
 _tm_sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+
+# Per-frame detections UDS — deepstream-app's write_targets_socket sendto's
+# here, one JSON datagram per frame. The bind is opt-in: only happens when
+# TARGETS_UDS env is set (e.g. on the sender Jetson). On the receiver Mac
+# leave it unset and only the CRUD/Beam paths run.
+TARGETS_UDS = os.environ.get("TARGETS_UDS", "")
 
 
 def _forward_to_tm(raw_b64: str) -> None:
@@ -285,6 +327,26 @@ async def _sim_loop() -> None:
                 del targets[tid]
                 await broadcast("target_deleted", {"id": tid})
         raise
+
+
+async def handle_publish(ws: WebSocketServerProtocol, payload: Any) -> str:
+    """Re-broadcast a {event,data} envelope to every other connected client.
+
+    Lets a remote producer (e.g. the Jetson UDS→WS bridge) push event streams
+    through this server without the producer having to bind a local socket.
+
+    Payload shape:
+        { "event": "frame_detection", "data": <arbitrary JSON> }
+    """
+    if not isinstance(payload, dict):
+        return err("publish", "payload must be {event, data}")
+    event = payload.get("event")
+    if not isinstance(event, str) or not event:
+        return err("publish", "payload.event (string) is required")
+    if "data" not in payload:
+        return err("publish", "payload.data is required")
+    await broadcast(event, payload["data"], exclude=ws)
+    return ok("publish", {"event": event})
 
 
 async def handle_sim_start(_ws: WebSocketServerProtocol, _payload: Any) -> str:
@@ -626,14 +688,65 @@ async def start_http(app: web.Application) -> web.AppRunner:
 # entry point
 # ---------------------------------------------------------------------------
 
+async def _start_targets_uds_listener():
+    """Bind the per-frame detections UDS and fan out as `frame_detection` events.
+
+    Only fires when TARGETS_UDS env is set. On any client other than the sender
+    Jetson, leave it unset — there's no UDS to bind to and we don't want
+    ENOENT on startup.
+    """
+    if not TARGETS_UDS:
+        log.info("TARGETS_UDS not set — skipping per-frame UDS listener")
+        return None
+
+    try:
+        os.unlink(TARGETS_UDS)
+    except FileNotFoundError:
+        pass
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        sock.bind(TARGETS_UDS)
+    except OSError as exc:
+        log.warning("targets UDS bind(%s) failed: %s — skipping listener", TARGETS_UDS, exc)
+        sock.close()
+        return None
+    os.chmod(TARGETS_UDS, 0o666)
+    sock.setblocking(False)
+
+    class _UdsProto(asyncio.DatagramProtocol):
+        def datagram_received(self, data, addr):
+            try:
+                payload = json.loads(data)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                log.debug("targets UDS bad payload: %s", exc)
+                return
+            asyncio.create_task(broadcast("frame_detection", payload))
+
+    loop = asyncio.get_running_loop()
+    transport, _ = await loop.create_datagram_endpoint(_UdsProto, sock=sock)
+    log.info("per-frame UDS listener bound at %s", TARGETS_UDS)
+    return transport
+
+
 async def main() -> None:
     http_app = web.Application()
     http_app.router.add_post("/beam", http_beam)
     await start_http(http_app)
 
+    targets_transport = await _start_targets_uds_listener()
+
     log.info("starting target WebSocket API on ws://%s:%d", HOST, PORT)
-    async with websockets.serve(handler, HOST, PORT):
-        await asyncio.Future()
+    try:
+        async with websockets.serve(handler, HOST, PORT):
+            await asyncio.Future()
+    finally:
+        if targets_transport is not None:
+            targets_transport.close()
+            try:
+                os.unlink(TARGETS_UDS)
+            except FileNotFoundError:
+                pass
 
 
 if __name__ == "__main__":

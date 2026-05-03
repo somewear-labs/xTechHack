@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <errno.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cinttypes>
 #include <cmath>
@@ -96,6 +97,7 @@ TargetManager::TargetManager(std::string beam_url, std::string inbound_socket_pa
     beam_workspace_      = getenv_or("TM_WORKSPACE_ID",   "71556");
     reid_sim_threshold_  = getenv_float("TM_REID_THRESHOLD", 0.7f);
     reid_max_banned_     = static_cast<std::size_t>(getenv_int("TM_REID_MAX_BANNED", 256));
+    inactive_ttl_sec_    = getenv_int("TM_INACTIVE_TTL_SEC", 300);
     verbose_frames_      = getenv_int("TM_VERBOSE", 0) != 0;
 }
 
@@ -193,27 +195,43 @@ void TargetManager::inbound_loop() {
         }
         if (n == 0) continue;
 
+        // Always log the arrival — Beam sends arbitrary content via radio and
+        // we want a clear "we got SOMETHING" signal even when the bytes aren't
+        // a TargetUpdate. First 32 bytes hex-dumped to fingerprint the source.
+        {
+            char hex[3 * 32 + 4] = {0};
+            ssize_t shown = (n < 32) ? n : 32;
+            for (ssize_t i = 0; i < shown; ++i) {
+                std::snprintf(hex + i * 3, 4, " %02x", buf[i]);
+            }
+            LOG2("[tm-inbound] recv %zd bytes hex[0..%zd]:%s%s\n",
+                 n, shown - 1, hex, (n > shown) ? " ..." : "");
+        }
+
         TargetUpdate u;
         if (!u.ParseFromArray(buf.data(), static_cast<int>(n))) {
-            LOG2("[tm-inbound] parse failed (%zd bytes)\n", n);
+            LOG2("[tm-inbound] parse failed (%zd bytes) — likely non-TargetUpdate Beam payload\n", n);
             continue;
         }
 
         const std::uint64_t id = u.id();
         switch (u.state()) {
-            case TARGET_STATE_ACTIVE: {
+            case TARGET_STATE_ACTIVE:
+            case TARGET_STATE_NEUTRALIZED: {
+                int new_state = static_cast<int>(u.state());
+                const char *name = (u.state() == TARGET_STATE_ACTIVE) ? "ACTIVE" : "NEUTRALIZED";
                 bool found = false;
                 {
                     std::lock_guard<std::mutex> lk(targets_mu_);
                     auto it = targets_.find(id);
                     if (it != targets_.end() && it->second) {
-                        it->second->active_ack = true;
-                        it->second->dirty      = true;   // surface the state on the next flush
+                        it->second->state = new_state;
+                        it->second->dirty = true;   // surface on next flush
                         found = true;
                     }
                 }
-                LOG2("[tm-inbound] id=%" PRIu64 " -> ACTIVE%s\n",
-                     id, found ? "" : " [unknown id, ignored]");
+                LOG2("[tm-inbound] id=%" PRIu64 " -> %s%s\n",
+                     id, name, found ? "" : " [unknown id, ignored]");
                 break;
             }
             case TARGET_STATE_INACTIVE: {
@@ -229,16 +247,17 @@ void TargetManager::inbound_loop() {
                     targets_.erase(id);
                 }
                 bool reid_banked = false;
+                const std::int64_t expiry = now_unix_seconds() + inactive_ttl_sec_;
                 {
                     std::lock_guard<std::mutex> lk(inactive_mu_);
-                    inactive_ids_.insert(id);
+                    inactive_ids_[id] = expiry;   // refresh on re-arrival
                     if (!captured.empty() && banned_features_.size() < reid_max_banned_) {
-                        banned_features_.push_back(std::move(captured));
+                        banned_features_.emplace_back(std::move(captured), expiry);
                         reid_banked = true;
                     }
                 }
-                LOG2("[tm-inbound] id=%" PRIu64 " -> INACTIVE (terminal)%s\n",
-                     id, reid_banked ? " [reid banked]" : "");
+                LOG2("[tm-inbound] id=%" PRIu64 " -> INACTIVE (ttl=%ds)%s\n",
+                     id, inactive_ttl_sec_, reid_banked ? " [reid banked]" : "");
                 break;
             }
             default:
@@ -299,7 +318,7 @@ void TargetManager::post_target(const Target &t) {
     loc->set_latitude (static_cast<std::int32_t>(t.latitude  * 1e7));
     loc->set_longitude(static_cast<std::int32_t>(t.longitude * 1e7));
     loc->set_timestamp(static_cast<std::uint32_t>(t.last_seen ? t.last_seen : now_unix_seconds()));
-    msg.set_state(t.active_ack ? ::TARGET_STATE_ACTIVE : ::TARGET_STATE_UNKNOWN);
+    msg.set_state(static_cast<TargetState>(t.state));
     if (!beam_workspace_.empty()) {
         try { msg.set_workspace_id(std::stoull(beam_workspace_)); } catch (...) {}
     }
@@ -356,6 +375,21 @@ void TargetManager::post_target(const Target &t) {
 
 void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
     if (!batch_meta) return;
+
+    // Evict expired suppression entries once per batch (≤30 Hz). Keeps the
+    // per-object lookups below correct without checking expiry inline.
+    {
+        const std::int64_t now = now_unix_seconds();
+        std::lock_guard<std::mutex> lk(inactive_mu_);
+        for (auto it = inactive_ids_.begin(); it != inactive_ids_.end();) {
+            if (it->second <= now) it = inactive_ids_.erase(it);
+            else ++it;
+        }
+        banned_features_.erase(
+            std::remove_if(banned_features_.begin(), banned_features_.end(),
+                [now](const auto &p) { return p.second <= now; }),
+            banned_features_.end());
+    }
 
     for (NvDsMetaList *lf = batch_meta->frame_meta_list; lf; lf = lf->next) {
         auto *frame_meta = static_cast<NvDsFrameMeta *>(lf->data);
@@ -430,11 +464,13 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
                 {
                     std::lock_guard<std::mutex> lk(inactive_mu_);
                     for (const auto &banned : banned_features_) {
-                        float s = dot(banned, reid_norm);
+                        float s = dot(banned.first, reid_norm);
                         if (s > best_sim) best_sim = s;
                         if (s >= reid_sim_threshold_) { reid_match = true; break; }
                     }
-                    if (reid_match) inactive_ids_.insert(packed_id);
+                    if (reid_match) {
+                        inactive_ids_[packed_id] = now_unix_seconds() + inactive_ttl_sec_;
+                    }
                 }
                 if (reid_match) {
                     std::printf("  obj id=%" PRIu64 " ReID match (sim=%.3f >= %.3f) -> SUPPRESS\n",
@@ -446,8 +482,7 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
 
             auto gp = geo_->pixel_to_gps(foot_u, foot_v);
 
-            bool inserted     = false;
-            bool target_active = false;
+            bool inserted = false;
             {
                 std::lock_guard<std::mutex> lk(targets_mu_);
                 auto _tgt = std::make_shared<Target>(obj->class_id, obj->object_id);
@@ -464,17 +499,10 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
                 it->second->last_seen   = now_unix_seconds();
                 it->second->dirty       = true;
                 if (!reid_norm.empty()) it->second->reid_feature = reid_norm;
-                target_active = it->second->active_ack;
             }
+            // Bbox colour is set later in apply_colors (post-process_meta hook).
+            // Writing it here would be clobbered by stock process_meta.
 
-            // Colour the bbox: blue while UNKNOWN, red once acknowledged ACTIVE.
-            // INACTIVE never reaches here — already removed from the frame above.
-            auto &rp = obj->rect_params;
-            rp.border_color.red   = target_active ? 1.0f : 0.0f;
-            rp.border_color.green = 0.0f;
-            rp.border_color.blue  = target_active ? 0.0f : 1.0f;
-            rp.border_color.alpha = 1.0f;
-            rp.border_width       = 3;
 
             if (verbose_frames_) {
                 std::printf("  obj id=%" PRIu64 " class=%s(%d) det=%.2f trk=%.2f bbox=(%.0f,%.0f %.0fx%.0f)%s\n",
@@ -491,6 +519,54 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
         }
     }
     if (verbose_frames_) std::fflush(stdout);
+}
+
+void TargetManager::apply_colors(NvDsBatchMeta *batch_meta) {
+    if (!batch_meta) return;
+
+    for (NvDsMetaList *lf = batch_meta->frame_meta_list; lf; lf = lf->next) {
+        auto *frame_meta = static_cast<NvDsFrameMeta *>(lf->data);
+        for (NvDsMetaList *lo = frame_meta->obj_meta_list; lo; lo = lo->next) {
+            auto *obj = static_cast<NvDsObjectMeta *>(lo->data);
+            const std::uint64_t packed_id =
+                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(obj->class_id) + 1) << 32) |
+                obj->object_id;
+
+            int state = 0;   // UNKNOWN default
+            {
+                std::lock_guard<std::mutex> lk(targets_mu_);
+                auto it = targets_.find(packed_id);
+                if (it != targets_.end() && it->second) state = it->second->state;
+            }
+
+            // Color/width per state. INACTIVE never reaches here — already
+            // removed from the frame upstream in on_batch.
+            double r = 0.0, g = 0.0, b = 1.0, a = 1.0;   // default UNKNOWN = blue
+            unsigned int width = 3;
+            switch (state) {
+                case 1:  r = 1.0; g = 0.0; b = 0.0; width = 6; break;  // ACTIVE = red
+                case 5: {  // NEUTRALIZED — flash green at ~2 Hz so it pops
+                    using namespace std::chrono;
+                    auto ms = duration_cast<milliseconds>(
+                        steady_clock::now().time_since_epoch()).count();
+                    bool on = ((ms / 250) % 2) == 0;
+                    r = 0.0; g = 1.0; b = 0.0;
+                    a = on ? 1.0 : 0.2;
+                    width = 6;
+                    break;
+                }
+                default: break;                                         // UNKNOWN/ACQUIRED/LOST = blue
+            }
+
+            auto &rp = obj->rect_params;
+            rp.border_color.red   = r;
+            rp.border_color.green = g;
+            rp.border_color.blue  = b;
+            rp.border_color.alpha = a;
+            rp.border_width       = width;
+            rp.has_color_info     = 0;
+        }
+    }
 }
 
 namespace {
@@ -514,6 +590,13 @@ int tm_init(const char *beam_url, const char *inbound_socket_path) {
 void tm_on_batch(NvDsBatchMeta *batch_meta) {
     try {
         if (g_tm) g_tm->on_batch(batch_meta);
+    } catch (...) {
+    }
+}
+
+void tm_apply_colors(NvDsBatchMeta *batch_meta) {
+    try {
+        if (g_tm) g_tm->apply_colors(batch_meta);
     } catch (...) {
     }
 }

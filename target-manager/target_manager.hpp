@@ -47,11 +47,14 @@ struct Target {
     // we go INACTIVE so the same person can't sneak back under a new track id.
     std::vector<float> reid_feature;
 
-    // Set when an inbound TargetUpdate(state=ACTIVE) arrives. flusher emits
-    // TARGET_STATE_ACTIVE in the next TargetResponse so the round trip is
-    // observable end-to-end. INACTIVE is terminal and lives in the
-    // TargetManager's inactive set instead.
-    bool active_ack = false;
+    // Persistent TargetState (mirrors the proto enum values; using plain int
+    // here so the header doesn't have to pull in protobuf):
+    //   0 = UNKNOWN   (default — bbox painted blue)
+    //   1 = ACTIVE    (acknowledged — bbox painted red)
+    //   5 = NEUTRALIZED (terminal-visible — bbox painted green)
+    // INACTIVE (=2) is *not* stored here; it's the terminal-suppressed state,
+    // which lives in `inactive_ids_` and removes the obj_meta from the frame.
+    int state = 0;
 
     Target(int class_id, std::uint64_t obj_id) {
         // (class_id + 1) in high 32 bits guarantees high half >= 1, so id is
@@ -71,6 +74,7 @@ public:
 
     bool run();
     void on_batch(NvDsBatchMeta *batch_meta);
+    void apply_colors(NvDsBatchMeta *batch_meta);
 
 private:
     std::string beam_url_;
@@ -80,17 +84,19 @@ private:
     std::unordered_map<std::uint64_t, std::shared_ptr<Target>> targets_;
     std::mutex targets_mu_;
 
-    // Terminal suppression set: ids that arrived over the inbound socket with
-    // state=INACTIVE. Once in here, the id is dropped from `targets_` and
-    // filtered out of every subsequent on_batch — never reactivated.
-    std::unordered_set<std::uint64_t> inactive_ids_;
-    // ReID embeddings captured at the moment of INACTIVE. New tracks with a
-    // ReID feature within `reid_sim_threshold_` cosine similarity of any entry
-    // here get suppressed too — covers re-entry under a fresh tracker id.
-    std::vector<std::vector<float>>   banned_features_;
+    // Time-bounded suppression: ids that arrived over the inbound socket with
+    // state=INACTIVE, mapped to their expiry (unix seconds). Once expired, the
+    // id is evicted on the next on_batch tick and a new track under the same
+    // id can re-enter normally. Re-arrivals refresh the expiry.
+    std::unordered_map<std::uint64_t, std::int64_t> inactive_ids_;
+    // ReID embeddings captured at the moment of INACTIVE, paired with the
+    // same expiry semantics. New tracks within `reid_sim_threshold_` cosine
+    // similarity of any non-expired entry get suppressed too.
+    std::vector<std::pair<std::vector<float>, std::int64_t>> banned_features_;
     std::mutex                        inactive_mu_;
     float                             reid_sim_threshold_ = 0.7f;
     std::size_t                       reid_max_banned_    = 256;
+    int                               inactive_ttl_sec_   = 300;   // 5 min
     bool                              verbose_frames_     = false;
     std::shared_ptr<CameraGeolocator> geo_;
 
