@@ -122,6 +122,7 @@ def _forward_to_tm(raw_b64: str) -> None:
 try:
     from proto_utils import (
         base64_to_target_dict as _proto_decode,
+        base64_to_target_dicts as _proto_decode_list,
         target_dict_to_bytestring as _proto_encode,
     )
     _PROTO_AVAILABLE = True
@@ -234,17 +235,23 @@ def err(action: str, message: str) -> str:
     return json.dumps({"action": action, "status": "error", "error": message})
 
 
-def _try_decode_proto_target(content: str) -> dict | None:
-    """Try to interpret a base64 string as a serialized TargetResponse proto. Returns None on failure."""
+def _try_decode_proto_targets(content: str) -> list[dict]:
+    """Try to interpret a base64 string as either a TargetResponseList (batched,
+    new format) or a single TargetResponse (legacy). Returns a list of target
+    dicts — empty if the content didn't decode to anything recognizable."""
     if not _PROTO_AVAILABLE or not content:
-        return None
+        return []
     try:
-        result = _proto_decode(content)
-        log.info("proto decode OK: id=%s state=%s loc=%s", result.get("id"), result.get("state"), result.get("tracking_location"))
-        return result
+        targets = _proto_decode_list(content)
     except Exception as exc:
         log.warning("Message content failed proto decode: %s (b64 prefix=%s)", exc, content[:32])
-        return None
+        return []
+    if targets:
+        log.info("proto decode OK: %d target(s) [%s]",
+                 len(targets),
+                 ", ".join(f"id={t.get('id')} state={t.get('state')}" for t in targets[:3])
+                 + (" …" if len(targets) > 3 else ""))
+    return targets
 
 
 async def broadcast(event: str, data: Any, exclude: WebSocketServerProtocol | None = None) -> None:
@@ -532,20 +539,21 @@ async def handle_beam_event(ws: WebSocketServerProtocol, payload: Any) -> str:
             elif event_type == "Message":
                 content = event.get("content", "")
                 _forward_to_tm(content)
-                target = _try_decode_proto_target(content)
-                if target is not None:
-                    target_id = target["id"]
-                    is_new = target_id not in targets
-                    target["updated_date"] = now_timestamp()
-                    target["label"] = identity_name
-                    target["beam_identity_id"] = identity_id
-                    targets[target_id] = target
-                    event_name = "target_created" if is_new else "target_updated"
-                    log.info("beam_event: decoded proto target %s from Message (%s)", target_id, event_name)
-                    await broadcast(event_name, target, exclude=ws)
-                    upserted.append(target)
+                decoded_targets = _try_decode_proto_targets(content)
+                if decoded_targets:
+                    for target in decoded_targets:
+                        target_id = target["id"]
+                        is_new = target_id not in targets
+                        target["updated_date"] = now_timestamp()
+                        target["label"] = identity_name
+                        target["beam_identity_id"] = identity_id
+                        targets[target_id] = target
+                        event_name = "target_created" if is_new else "target_updated"
+                        log.info("beam_event: decoded proto target %s from Message (%s)", target_id, event_name)
+                        await broadcast(event_name, target, exclude=ws)
+                        upserted.append(target)
                 else:
-                    log.info("beam_event: Message not a TargetResponse proto, broadcasting raw (identity=%s content_prefix=%s)", identity_id, content[:32])
+                    log.info("beam_event: Message not a TargetResponse{,List} proto, broadcasting raw (identity=%s content_prefix=%s)", identity_id, content[:32])
                     await broadcast("beam_message", {
                         "identity":   identity,
                         "account_id": workspace_id,

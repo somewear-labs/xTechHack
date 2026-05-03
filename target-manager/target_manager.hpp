@@ -51,10 +51,22 @@ struct Target {
     // here so the header doesn't have to pull in protobuf):
     //   0 = UNKNOWN   (default — bbox painted blue)
     //   1 = ACTIVE    (acknowledged — bbox painted red)
-    //   5 = NEUTRALIZED (terminal-visible — bbox painted green)
+    //   5 = NEUTRALIZED (terminal-visible — bbox painted green, TTL-bounded)
     // INACTIVE (=2) is *not* stored here; it's the terminal-suppressed state,
     // which lives in `inactive_ids_` and removes the obj_meta from the frame.
     int state = 0;
+
+    // Unix-seconds when state transitioned into a terminal-visible value
+    // (currently only NEUTRALIZED). 0 means "not in a terminal state."
+    // After inactive_ttl_sec_ has elapsed, on_batch resets state→UNKNOWN
+    // so the same packed id can re-progress through the lifecycle.
+    std::int64_t state_terminal_at = 0;
+
+    // Last `state` value apply_colors painted onto the bbox. -1 = never
+    // painted yet. Used to log only on state-edge transitions, since
+    // apply_colors runs at ~30 Hz per object and per-frame logging would
+    // flood. Updated under targets_mu_ alongside the read of `state`.
+    int last_painted_state = -1;
 
     Target(int class_id, std::uint64_t obj_id) {
         // (class_id + 1) in high 32 bits guarantees high half >= 1, so id is
@@ -111,7 +123,11 @@ private:
 
     void flusher_loop();
     void flush_once();
-    void post_target(const Target &t);
+    // Build a single TargetResponseList containing all dirty targets in the
+    // snapshot and POST it as one Beam package. Collapses N round trips into
+    // 1 (each Beam package = a separate radio TX/ack cycle), at the cost of
+    // a slightly larger single payload.
+    void post_batch(const std::vector<Target> &snapshot);
 
     // Inbound Unix-domain SOCK_DGRAM listener — wss writes raw proto bytes
     // (or anything else) to inbound_socket_path_; we print whatever lands.

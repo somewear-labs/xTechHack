@@ -66,6 +66,16 @@ std::int64_t now_unix_seconds() {
     return static_cast<std::int64_t>(std::time(nullptr));
 }
 
+const char *state_name(int s) {
+    switch (s) {
+        case 0: return "UNKNOWN";
+        case 1: return "ACTIVE";
+        case 2: return "INACTIVE";
+        case 5: return "NEUTRALIZED";
+        default: return "STATE?";
+    }
+}
+
 // Copy + L2-normalize. Returns empty if input is null/empty/zero-norm.
 std::vector<float> l2_normalize_copy(const float *src, std::uint32_t n) {
     if (!src || n == 0) return {};
@@ -226,6 +236,11 @@ void TargetManager::inbound_loop() {
                     auto it = targets_.find(id);
                     if (it != targets_.end() && it->second) {
                         it->second->state = new_state;
+                        // NEUTRALIZED is terminal-visible — start the TTL clock.
+                        // ACTIVE clears any prior terminal mark (state can only
+                        // arrive here via a fresh inbound update).
+                        it->second->state_terminal_at =
+                            (new_state == TARGET_STATE_NEUTRALIZED) ? now_unix_seconds() : 0;
                         it->second->dirty = true;   // surface on next flush
                         found = true;
                     }
@@ -302,37 +317,45 @@ void TargetManager::flush_once() {
     }
     if (snapshot.empty()) return;
 
-    std::printf("[tm] flush: posting %zu target(s) to beam\n", snapshot.size());
-    for (const auto &t : snapshot) {
-        post_target(t);
-    }
+    std::printf("[tm] flush: posting %zu target(s) in 1 batch to beam\n", snapshot.size());
+    post_batch(snapshot);
 }
 
-void TargetManager::post_target(const Target &t) {
-    TargetResponse msg;
-    msg.set_id(static_cast<std::int64_t>(t.id));
-    auto *upd = msg.mutable_updated_date();
-    upd->set_seconds(t.last_seen ? t.last_seen : now_unix_seconds());
-    upd->set_nanos(0);
-    auto *loc = msg.mutable_tracking_location();
-    loc->set_latitude (static_cast<std::int32_t>(t.latitude  * 1e7));
-    loc->set_longitude(static_cast<std::int32_t>(t.longitude * 1e7));
-    loc->set_timestamp(static_cast<std::uint32_t>(t.last_seen ? t.last_seen : now_unix_seconds()));
-    msg.set_state(static_cast<TargetState>(t.state));
+void TargetManager::post_batch(const std::vector<Target> &snapshot) {
+    TargetResponseList batch;
+    batch.mutable_targets()->Reserve(static_cast<int>(snapshot.size()));
+
+    std::uint64_t workspace_id_u64 = 0;
+    bool          have_workspace_id = false;
     if (!beam_workspace_.empty()) {
-        try { msg.set_workspace_id(std::stoull(beam_workspace_)); } catch (...) {}
+        try { workspace_id_u64 = std::stoull(beam_workspace_); have_workspace_id = true; }
+        catch (...) {}
     }
-    // Pack bbox as four uint16 fields: (left<<48) | (top<<32) | (width<<16) | height.
-    std::uint64_t bbox_packed =
-        (static_cast<std::uint64_t>(static_cast<std::uint16_t>(t.bbox_left))   << 48) |
-        (static_cast<std::uint64_t>(static_cast<std::uint16_t>(t.bbox_top))    << 32) |
-        (static_cast<std::uint64_t>(static_cast<std::uint16_t>(t.bbox_width))  << 16) |
-         static_cast<std::uint64_t>(static_cast<std::uint16_t>(t.bbox_height));
-    msg.set_bbox(bbox_packed);
+
+    for (const auto &t : snapshot) {
+        TargetResponse *msg = batch.add_targets();
+        msg->set_id(static_cast<std::int64_t>(t.id));
+        auto *upd = msg->mutable_updated_date();
+        upd->set_seconds(t.last_seen ? t.last_seen : now_unix_seconds());
+        upd->set_nanos(0);
+        auto *loc = msg->mutable_tracking_location();
+        loc->set_latitude (static_cast<std::int32_t>(t.latitude  * 1e7));
+        loc->set_longitude(static_cast<std::int32_t>(t.longitude * 1e7));
+        loc->set_timestamp(static_cast<std::uint32_t>(t.last_seen ? t.last_seen : now_unix_seconds()));
+        msg->set_state(static_cast<TargetState>(t.state));
+        if (have_workspace_id) msg->set_workspace_id(workspace_id_u64);
+        // Pack bbox as four uint16 fields: (left<<48) | (top<<32) | (width<<16) | height.
+        std::uint64_t bbox_packed =
+            (static_cast<std::uint64_t>(static_cast<std::uint16_t>(t.bbox_left))   << 48) |
+            (static_cast<std::uint64_t>(static_cast<std::uint16_t>(t.bbox_top))    << 32) |
+            (static_cast<std::uint64_t>(static_cast<std::uint16_t>(t.bbox_width))  << 16) |
+             static_cast<std::uint64_t>(static_cast<std::uint16_t>(t.bbox_height));
+        msg->set_bbox(bbox_packed);
+    }
 
     std::string proto_bytes;
-    if (!msg.SerializeToString(&proto_bytes)) {
-        std::printf("[tm] post_target: SerializeToString failed for id=%" PRIu64 "\n", t.id);
+    if (!batch.SerializeToString(&proto_bytes)) {
+        std::printf("[tm] post_batch: SerializeToString failed (n=%zu)\n", snapshot.size());
         return;
     }
     std::string body =
@@ -343,16 +366,18 @@ void TargetManager::post_target(const Target &t) {
     // Detach a worker that owns its own curl handle. Beam's `message send`
     // CLI is synchronous on the radio link, so a single POST can hang for
     // tens of seconds. Fire-and-forget keeps the flusher loop unblocked.
-    std::uint64_t id  = t.id;
-    std::string   url = beam_api_url_;
-    std::thread([id, url = std::move(url), body = std::move(body)]() {
+    std::size_t   n         = snapshot.size();
+    std::size_t   body_size = body.size();
+    std::size_t   proto_size = proto_bytes.size();
+    std::string   url       = beam_api_url_;
+    std::thread([n, body_size, proto_size, url = std::move(url), body = std::move(body)]() {
         CURL *c = curl_easy_init();
         if (!c) return;
         curl_slist *headers = curl_slist_append(nullptr, "Content-Type: application/json");
         curl_easy_setopt(c, CURLOPT_URL,                url.c_str());
         curl_easy_setopt(c, CURLOPT_HTTPHEADER,         headers);
         curl_easy_setopt(c, CURLOPT_POSTFIELDS,         body.c_str());
-        curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE,      static_cast<long>(body.size()));
+        curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE,      static_cast<long>(body_size));
         curl_easy_setopt(c, CURLOPT_NOSIGNAL,           1L);
         curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT_MS,  1000L);
         curl_easy_setopt(c, CURLOPT_TIMEOUT_MS,         30000L);
@@ -361,10 +386,11 @@ void TargetManager::post_target(const Target &t) {
         long http = 0;
         curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http);
         if (rc == CURLE_OK) {
-            std::printf("[tm] post id=%" PRIu64 " http=%ld\n", id, http);
+            std::printf("[tm] post batch=%zu proto=%zuB body=%zuB http=%ld\n",
+                        n, proto_size, body_size, http);
         } else {
-            std::printf("[tm] post id=%" PRIu64 " curl err: %s (http=%ld)\n",
-                        id, curl_easy_strerror(rc), http);
+            std::printf("[tm] post batch=%zu curl err: %s (http=%ld)\n",
+                        n, curl_easy_strerror(rc), http);
         }
         std::fflush(stdout);
 
@@ -378,8 +404,8 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
 
     // Evict expired suppression entries once per batch (≤30 Hz). Keeps the
     // per-object lookups below correct without checking expiry inline.
+    const std::int64_t now = now_unix_seconds();
     {
-        const std::int64_t now = now_unix_seconds();
         std::lock_guard<std::mutex> lk(inactive_mu_);
         for (auto it = inactive_ids_.begin(); it != inactive_ids_.end();) {
             if (it->second <= now) it = inactive_ids_.erase(it);
@@ -389,6 +415,21 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
             std::remove_if(banned_features_.begin(), banned_features_.end(),
                 [now](const auto &p) { return p.second <= now; }),
             banned_features_.end());
+    }
+    // TTL on terminal-visible NEUTRALIZED: reset to UNKNOWN so the same
+    // packed id can re-progress (UNKNOWN→ACTIVE→NEUTRALIZED/INACTIVE again).
+    {
+        std::lock_guard<std::mutex> lk(targets_mu_);
+        for (auto &kv : targets_) {
+            auto &t = kv.second;
+            if (!t) continue;
+            if (t->state == 5 /*NEUTRALIZED*/ && t->state_terminal_at > 0
+                && (now - t->state_terminal_at) >= inactive_ttl_sec_) {
+                t->state             = 0;
+                t->state_terminal_at = 0;
+                t->dirty             = true;   // surface the demotion on next flush
+            }
+        }
     }
 
     for (NvDsMetaList *lf = batch_meta->frame_meta_list; lf; lf = lf->next) {
@@ -500,6 +541,10 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
                 it->second->dirty       = true;
                 if (!reid_norm.empty()) it->second->reid_feature = reid_norm;
             }
+            if (inserted) {
+                std::printf("[tm] new id=%" PRIu64 " class=%d first_seen\n",
+                            packed_id, obj->class_id);
+            }
             // Bbox colour is set later in apply_colors (post-process_meta hook).
             // Writing it here would be clobbered by stock process_meta.
 
@@ -532,11 +577,18 @@ void TargetManager::apply_colors(NvDsBatchMeta *batch_meta) {
                 (static_cast<std::uint64_t>(static_cast<std::uint32_t>(obj->class_id) + 1) << 32) |
                 obj->object_id;
 
-            int state = 0;   // UNKNOWN default
+            int  state         = 0;   // UNKNOWN default
+            bool state_changed = false;
             {
                 std::lock_guard<std::mutex> lk(targets_mu_);
                 auto it = targets_.find(packed_id);
-                if (it != targets_.end() && it->second) state = it->second->state;
+                if (it != targets_.end() && it->second) {
+                    state = it->second->state;
+                    if (state != it->second->last_painted_state) {
+                        it->second->last_painted_state = state;
+                        state_changed = true;
+                    }
+                }
             }
 
             // Color/width per state. INACTIVE never reaches here — already
