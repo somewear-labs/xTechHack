@@ -69,11 +69,9 @@ std::int64_t now_unix_seconds() {
 const char *state_name(int s) {
     switch (s) {
         case 0: return "UNKNOWN";
-        case 1: return "ACTIVE";
-        case 2: return "INACTIVE";
-        case 3: return "ACQUIRED";
-        case 4: return "LOST";
-        case 5: return "NEUTRALIZED";
+        case 1: return "CONFIRMED";
+        case 2: return "NEUTRALIZED";
+        case 3: return "INACTIVE";
         default: return "STATE?";
     }
 }
@@ -228,9 +226,7 @@ void TargetManager::inbound_loop() {
 
         const std::uint64_t id = u.id();
         switch (u.state()) {
-            case TARGET_STATE_ACTIVE:
-            case TARGET_STATE_ACQUIRED:
-            case TARGET_STATE_LOST:
+            case TARGET_STATE_CONFIRMED:
             case TARGET_STATE_NEUTRALIZED: {
                 int new_state = static_cast<int>(u.state());
                 const char *name = state_name(new_state);
@@ -241,8 +237,8 @@ void TargetManager::inbound_loop() {
                     if (it != targets_.end() && it->second) {
                         it->second->state = new_state;
                         // NEUTRALIZED is terminal-visible — start the TTL clock.
-                        // ACTIVE clears any prior terminal mark (state can only
-                        // arrive here via a fresh inbound update).
+                        // CONFIRMED clears any prior terminal mark (state can
+                        // only arrive here via a fresh inbound update).
                         it->second->state_terminal_at =
                             (new_state == TARGET_STATE_NEUTRALIZED) ? now_unix_seconds() : 0;
                         it->second->dirty = true;   // surface on next flush
@@ -652,27 +648,15 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
             }
             {
                 // Hex from client/public/app.js — must stay in sync with web UI.
-                // UNKNOWN  #5F666C gray (default)
-                // ACTIVE   #226FEE blue
-                // ACQUIRED #1EB982 green
-                // LOST     #F8C100 yellow
-                // NEUTRALIZED #E4591D orange (flashing for visibility)
+                // UNKNOWN     #5F666C gray (default)
+                // CONFIRMED   #226FEE blue
+                // NEUTRALIZED #E4591D orange
+                // INACTIVE never reaches OSD — removed from frame upstream.
                 double r = 0.373, g = 0.400, b = 0.424, a = 1.0;   // UNKNOWN gray
                 unsigned int width = 3;
                 switch (t_state) {
-                    case 1: r = 0.133; g = 0.435; b = 0.933; width = 6; break;  // ACTIVE
-                    case 3: r = 0.118; g = 0.725; b = 0.510; width = 6; break;  // ACQUIRED
-                    case 4: r = 0.973; g = 0.757; b = 0.000; width = 6; break;  // LOST
-                    case 5: {                                                    // NEUTRALIZED — flash
-                        using namespace std::chrono;
-                        auto ms = duration_cast<milliseconds>(
-                            steady_clock::now().time_since_epoch()).count();
-                        bool on = ((ms / 250) % 2) == 0;
-                        r = 0.894; g = 0.349; b = 0.114;
-                        a = on ? 1.0 : 0.25;
-                        width = 6;
-                        break;
-                    }
+                    case 1: r = 0.133; g = 0.435; b = 0.933; width = 6; break;  // CONFIRMED
+                    case 2: r = 0.894; g = 0.349; b = 0.114; width = 6; break;  // NEUTRALIZED
                     default: break;
                 }
                 auto &rp = obj->rect_params;
@@ -733,26 +717,13 @@ void TargetManager::apply_colors(NvDsBatchMeta *batch_meta) {
             // stay in sync with web UI. INACTIVE never reaches here (removed
             // from frame upstream in on_batch).
             //   UNKNOWN     #5F666C  gray   (default)
-            //   ACTIVE      #226FEE  blue
-            //   ACQUIRED    #1EB982  green
-            //   LOST        #F8C100  yellow
-            //   NEUTRALIZED #E4591D  orange (flashing for visibility)
+            //   CONFIRMED   #226FEE  blue
+            //   NEUTRALIZED #E4591D  orange
             double r = 0.373, g = 0.400, b = 0.424, a = 1.0;   // UNKNOWN gray
             unsigned int width = 3;
             switch (state) {
-                case 1: r = 0.133; g = 0.435; b = 0.933; width = 6; break;  // ACTIVE
-                case 3: r = 0.118; g = 0.725; b = 0.510; width = 6; break;  // ACQUIRED
-                case 4: r = 0.973; g = 0.757; b = 0.000; width = 6; break;  // LOST
-                case 5: {                                                    // NEUTRALIZED — flash
-                    using namespace std::chrono;
-                    auto ms = duration_cast<milliseconds>(
-                        steady_clock::now().time_since_epoch()).count();
-                    bool on = ((ms / 250) % 2) == 0;
-                    r = 0.894; g = 0.349; b = 0.114;
-                    a = on ? 1.0 : 0.25;
-                    width = 6;
-                    break;
-                }
+                case 1: r = 0.133; g = 0.435; b = 0.933; width = 6; break;  // CONFIRMED
+                case 2: r = 0.894; g = 0.349; b = 0.114; width = 6; break;  // NEUTRALIZED
                 default: break;
             }
 

@@ -43,7 +43,7 @@ import socket
 import websockets
 
 UDS_PATH       = os.environ.get("TARGETS_UDS", "/run/swl/targets.sock")
-REMOTE_WS      = os.environ.get("REMOTE_WS", "ws://100.68.81.179:8000")
+REMOTE_WS      = os.environ.get("REMOTE_WS", "ws://100.68.81.250:8000")
 EVENT_NAME     = os.environ.get("EVENT_NAME", "frame_detection")
 # Same env var the C++ target-manager flusher reads (default 5 there too),
 # so WS publish cadence matches mesh push cadence.
