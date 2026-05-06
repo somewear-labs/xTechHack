@@ -66,6 +66,11 @@ target_link_libraries(target_manager
     PRIVATE
         PkgConfig::CURL
         PkgConfig::PROTOBUF
+        # NvBufSurface + Transform — bbox-crop extraction for the on-board
+        # VLM. Source frames on Jetson are NVBUF_MEM_SURFACE_ARRAY (GPU only),
+        # so we use Transform to crop+convert→RGBA into a CPU-mappable dst.
+        ${DEEPSTREAM_DIR}/lib/libnvbufsurface.so
+        ${DEEPSTREAM_DIR}/lib/libnvbufsurftransform.so
 )
 
 target_compile_options(target_manager PRIVATE -Wall -Wextra -Wno-unused-parameter)

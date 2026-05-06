@@ -4,6 +4,7 @@
 #include "geolocation.hpp"
 
 #include <nvdsmeta.h>
+#include <gst/gst.h>
 
 #include <curl/curl.h>
 
@@ -93,6 +94,10 @@ public:
 
     bool run();
     void on_batch(NvDsBatchMeta *batch_meta);
+    // Same as on_batch but also takes the GstBuffer so we can reach the
+    // NvBufSurface for bbox-crop extraction (VLM pipeline). buf may be null,
+    // in which case crop extraction is skipped.
+    void on_batch_with_buffer(GstBuffer *buf, NvDsBatchMeta *batch_meta);
     void apply_colors(NvDsBatchMeta *batch_meta);
 
 private:
@@ -102,6 +107,26 @@ private:
     std::shared_ptr<curl_slist> headers_;
     std::unordered_map<std::uint64_t, std::shared_ptr<Target>> targets_;
     std::mutex targets_mu_;
+
+    // VLM crop dedup: one bbox crop per target lifetime. Set lives independent
+    // of `targets_` so a target that briefly drops out and returns under the
+    // same id doesn't get re-cropped — the original ReID/state is preserved.
+    std::unordered_set<std::uint64_t> vlm_cropped_ids_;
+    std::mutex                        vlm_mu_;
+
+    // VLM size prior: per packed_id length-in-meters, populated by the
+    // background loader from <id>.json sidecars written by bin/vlm_watch.py
+    // next to /run/swl/crops/<id>.ppm. Used by on_batch to pick the
+    // angular-subtense geolocation branch (range = length_m * fx / bbox_w_px)
+    // when a value is available, falling back to foot-pixel projection
+    // otherwise. Empty until the watchdog finishes inferring on a target.
+    std::unordered_map<std::uint64_t, double> size_priors_m_;
+    std::mutex                                size_priors_mu_;
+    std::thread                               vlm_loader_thread_;
+    std::string                               vlm_crops_dir_;
+    int                                       vlm_loader_period_sec_ = 5;
+    bool                                      vlm_size_prior_enabled_ = true;
+    void vlm_loader_loop();
 
     // Time-bounded suppression: ids that arrived over the inbound socket with
     // state=INACTIVE, mapped to their expiry (unix seconds). Once expired, the

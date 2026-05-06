@@ -4,11 +4,15 @@
 #include "target_proto.pb.h"
 
 #include <nvds_tracker_meta.h>
+#include <nvbufsurface.h>
+#include <nvbufsurftransform.h>
 
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <cstring>
 #include <errno.h>
 
 #include <algorithm>
@@ -16,6 +20,7 @@
 #include <cinttypes>
 #include <cmath>
 #include <cstdio>
+#include <optional>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -109,6 +114,9 @@ TargetManager::TargetManager(std::string beam_url, std::string inbound_socket_pa
     reid_max_banned_     = static_cast<std::size_t>(getenv_int("TM_REID_MAX_BANNED", 256));
     inactive_ttl_sec_    = getenv_int("TM_INACTIVE_TTL_SEC", 300);
     verbose_frames_      = getenv_int("TM_VERBOSE", 0) != 0;
+    vlm_crops_dir_           = getenv_or("TM_VLM_CROPS_DIR", "/run/swl/crops");
+    vlm_loader_period_sec_   = getenv_int("TM_VLM_LOADER_PERIOD_SEC", 5);
+    vlm_size_prior_enabled_  = getenv_int("TM_VLM_SIZE_PRIOR_ENABLED", 1) != 0;
 }
 
 TargetManager::~TargetManager() {
@@ -122,6 +130,7 @@ TargetManager::~TargetManager() {
         inbound_fd_ = -1;
     }
     if (inbound_thread_.joinable()) inbound_thread_.join();
+    if (vlm_loader_thread_.joinable()) vlm_loader_thread_.join();
     if (!inbound_socket_path_.empty()) ::unlink(inbound_socket_path_.c_str());
 }
 
@@ -141,6 +150,9 @@ bool TargetManager::run() {
 
     running_.store(true);
     flusher_ = std::thread(&TargetManager::flusher_loop, this);
+    if (vlm_size_prior_enabled_) {
+        vlm_loader_thread_ = std::thread(&TargetManager::vlm_loader_loop, this);
+    }
 
     std::printf("[tm] flusher started: cadence=%ds beam_url=%s\n", cadence_sec_, beam_api_url_.c_str());
 
@@ -189,6 +201,30 @@ void TargetManager::inbound_loop() {
             std::fflush(flog);
         }
     }
+
+    // Persistent state-transition log. Default points at /run/swl which is
+    // bind-mounted from the host (swl-vision/run/), so entries survive
+    // container recreate — answers "did this state change ever land?" without
+    // chasing ephemeral docker logs. One line per inbound state event.
+    const char *xlog_path = getenv_or("TM_STATE_LOG", "/run/swl/tm-state.log");
+    std::FILE *xlog = nullptr;
+    if (xlog_path && *xlog_path) {
+        xlog = std::fopen(xlog_path, "a");
+        if (xlog) {
+            std::setvbuf(xlog, nullptr, _IOLBF, 0);
+        }
+    }
+    auto log_transition = [&xlog](std::uint64_t id, const char *new_state, const char *flags) {
+        if (!xlog) return;
+        char ts[32];
+        std::time_t now = std::time(nullptr);
+        std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&now));
+        int class_id = static_cast<int>((id >> 8) & 0xFFu) - 1;
+        int obj_id   = static_cast<int>(id & 0xFFu);
+        std::fprintf(xlog, "%s id=%" PRIu64 " class=%d obj=%d -> %s%s\n",
+                     ts, id, class_id, obj_id, new_state, flags);
+        std::fflush(xlog);
+    };
 
 #define LOG2(...) do { \
     if (flog) { std::fprintf(flog, __VA_ARGS__); std::fflush(flog); } \
@@ -247,6 +283,7 @@ void TargetManager::inbound_loop() {
                 }
                 LOG2("[tm-inbound] id=%" PRIu64 " -> %s%s\n",
                      id, name, found ? "" : " [unknown id, ignored]");
+                log_transition(id, name, found ? "" : " [unknown id, ignored]");
                 break;
             }
             case TARGET_STATE_INACTIVE: {
@@ -273,18 +310,86 @@ void TargetManager::inbound_loop() {
                 }
                 LOG2("[tm-inbound] id=%" PRIu64 " -> INACTIVE (ttl=%ds)%s\n",
                      id, inactive_ttl_sec_, reid_banked ? " [reid banked]" : "");
+                {
+                    char flags[64];
+                    std::snprintf(flags, sizeof(flags), " ttl=%d%s",
+                                  inactive_ttl_sec_, reid_banked ? " [reid banked]" : "");
+                    log_transition(id, "INACTIVE", flags);
+                }
                 break;
             }
-            default:
+            default: {
                 LOG2("[tm-inbound] id=%" PRIu64 " state=%d (ignored)\n",
                      id, static_cast<int>(u.state()));
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(u.state()));
+                log_transition(id, buf, " [ignored]");
                 break;
+            }
         }
     }
 
 #undef LOG2
 
     if (flog) std::fclose(flog);
+}
+
+// Background loader for VLM size priors. Polls vlm_crops_dir_ every
+// vlm_loader_period_sec_ seconds for <id>.json sidecars, parses out the
+// length_m field, and inserts into size_priors_m_. One-shot per id —
+// once a prior is recorded it isn't refreshed (the watchdog only writes
+// once per target lifetime anyway). Tolerates a missing dir / missing
+// watchdog: just keeps polling.
+void TargetManager::vlm_loader_loop() {
+    while (running_.load()) {
+        DIR *dir = ::opendir(vlm_crops_dir_.c_str());
+        if (dir) {
+            struct dirent *ent;
+            while ((ent = ::readdir(dir)) != nullptr) {
+                std::string name = ent->d_name;
+                if (name.size() < 6) continue;
+                if (name.compare(name.size() - 5, 5, ".json") != 0) continue;
+                // Parse <id>.json — id is decimal packed_id.
+                std::uint64_t packed_id = 0;
+                try { packed_id = std::stoull(name.substr(0, name.size() - 5)); }
+                catch (...) { continue; }
+                {
+                    std::lock_guard<std::mutex> lk(size_priors_mu_);
+                    if (size_priors_m_.count(packed_id)) continue;
+                }
+                std::string path = vlm_crops_dir_ + "/" + name;
+                std::FILE *f = std::fopen(path.c_str(), "r");
+                if (!f) continue;
+                char buf[1024];
+                size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+                std::fclose(f);
+                buf[n] = '\0';
+                // Find "length_m": <number>. Cheap hand parse to avoid
+                // dragging in a JSON dep.
+                const char *p = std::strstr(buf, "\"length_m\"");
+                if (!p) continue;
+                p = std::strchr(p, ':');
+                if (!p) continue;
+                ++p;
+                while (*p == ' ' || *p == '\t') ++p;
+                char *endp = nullptr;
+                double length_m = std::strtod(p, &endp);
+                if (endp == p || length_m <= 0.0) continue;
+                {
+                    std::lock_guard<std::mutex> lk(size_priors_mu_);
+                    size_priors_m_[packed_id] = length_m;
+                }
+                std::printf("[tm-vlm] size prior id=%" PRIu64 " length_m=%.1f\n",
+                            packed_id, length_m);
+                std::fflush(stdout);
+            }
+            ::closedir(dir);
+        }
+        // Sleep with cv so destructor can wake us early.
+        std::unique_lock<std::mutex> lk(flusher_mu_);
+        flusher_cv_.wait_for(lk, std::chrono::seconds(vlm_loader_period_sec_),
+                             [this] { return !running_.load(); });
+    }
 }
 
 void TargetManager::flusher_loop() {
@@ -420,7 +525,7 @@ void TargetManager::post_batch(const std::vector<Target> &chunk) {
     std::string body =
         "{\"message\":{\"content\":\""
         + base64_encode(proto_bytes)
-        + "\"},\"channels\":[\"Radio\",\"Cellular\"],\"workspaceId\":\"71556\"}";
+        + "\"},\"channels\":[\"Radio\"],\"workspaceId\":\"71556\"}";  // mesh-only; workspace-broadcast (no targetUserId).
 
     // Detach a worker that owns its own curl handle. Beam's `message send`
     // CLI is synchronous on the radio link, so a single POST can hang for
@@ -582,7 +687,28 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
                 }
             }
 
-            auto gp = geo_->pixel_to_gps(foot_u, foot_v);
+            // Prefer the VLM-driven size prior when available — at our
+            // horizon-grazing pitch (CAM_PITCH=0) the foot-pixel method is
+            // ill-conditioned (1 px of v ≈ tens of meters of range), but
+            // angular-subtense from a known vessel length is well-behaved.
+            // Fall back to foot-pixel projection until the prior arrives.
+            std::optional<GeoPoint> gp;
+            if (vlm_size_prior_enabled_) {
+                double length_m = 0.0;
+                {
+                    std::lock_guard<std::mutex> lk(size_priors_mu_);
+                    auto it = size_priors_m_.find(packed_id);
+                    if (it != size_priors_m_.end()) length_m = it->second;
+                }
+                if (length_m > 0.0 && bb.width > 0.5f) {
+                    const double u_center = static_cast<double>(bb.left) + bb.width  * 0.5;
+                    const double v_center = static_cast<double>(bb.top)  + bb.height * 0.5;
+                    gp = geo_->pixel_to_gps_from_size(u_center, v_center,
+                                                     static_cast<double>(bb.width),
+                                                     length_m);
+                }
+            }
+            if (!gp) gp = geo_->pixel_to_gps(foot_u, foot_v);
 
             // Threshold below which a lat/lon update is considered "no real
             // motion." 1e-5 deg ≈ 1 m at our latitudes. Keeps stationary
@@ -686,6 +812,188 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
     if (verbose_frames_) std::fflush(stdout);
 }
 
+// Bbox crop via NvBufSurfTransform — crops + color-converts (NV12_709 → RGBA)
+// + scales the bbox region into a CPU-mappable destination surface. Source
+// memory on Jetson DeepStream is NVBUF_MEM_SURFACE_ARRAY (GPU-only), so we
+// can't NvBufSurfaceMap it directly; the Transform path is the supported way.
+// Output: PPM (P6) at /run/swl/crops/<id>.ppm, sized 256x256 for VLM input.
+static constexpr int kVLMCropSize = 256;
+
+static bool tm_vlm_write_ppm_crop(NvBufSurface *src,
+                                  uint32_t      frame_idx,
+                                  int bbox_l, int bbox_t, int bbox_w, int bbox_h,
+                                  std::uint64_t target_id) {
+    if (!src || frame_idx >= src->numFilled) return false;
+
+    const int W = static_cast<int>(src->surfaceList[frame_idx].width);
+    const int H = static_cast<int>(src->surfaceList[frame_idx].height);
+    const int pad = 8;
+    int x0 = std::max(0, bbox_l - pad);
+    int y0 = std::max(0, bbox_t - pad);
+    int x1 = std::min(W, bbox_l + bbox_w + pad);
+    int y1 = std::min(H, bbox_t + bbox_h + pad);
+    if (x1 <= x0 || y1 <= y0) return false;
+    const uint32_t crop_w = static_cast<uint32_t>(x1 - x0);
+    const uint32_t crop_h = static_cast<uint32_t>(y1 - y0);
+
+    // Allocate destination surface (RGBA, system-mappable, 256x256).
+    NvBufSurfaceCreateParams cparams{};
+    cparams.gpuId       = 0;
+    cparams.width       = kVLMCropSize;
+    cparams.height      = kVLMCropSize;
+    cparams.size        = 0;
+    cparams.colorFormat = NVBUF_COLOR_FORMAT_RGBA;
+    cparams.layout      = NVBUF_LAYOUT_PITCH;
+    cparams.memType     = NVBUF_MEM_DEFAULT;       // Jetson-recommended; Tegra DMABUF
+
+    NvBufSurface *dst = nullptr;
+    if (NvBufSurfaceCreate(&dst, 1, &cparams) != 0 || !dst) {
+        std::printf("[tm-vlm] NvBufSurfaceCreate failed (id=%" PRIu64 ")\n", target_id);
+        return false;
+    }
+    dst->numFilled = 1;
+
+    // Init transform session once per process; harmless if called repeatedly.
+    static bool s_xfm_inited = false;
+    if (!s_xfm_inited) {
+        NvBufSurfTransformConfigParams sp{};
+        sp.gpu_id = 0;
+        sp.compute_mode = NvBufSurfTransformCompute_Default;
+        if (NvBufSurfTransformSetSessionParams(&sp) != NvBufSurfTransformError_Success) {
+            std::printf("[tm-vlm] NvBufSurfTransformSetSessionParams failed\n");
+        }
+        s_xfm_inited = true;
+    }
+
+    NvBufSurfTransformRect src_rect{};
+    src_rect.top    = static_cast<uint32_t>(y0);
+    src_rect.left   = static_cast<uint32_t>(x0);
+    src_rect.width  = crop_w;
+    src_rect.height = crop_h;
+    NvBufSurfTransformRect dst_rect{};
+    dst_rect.top    = 0;
+    dst_rect.left   = 0;
+    dst_rect.width  = kVLMCropSize;
+    dst_rect.height = kVLMCropSize;
+
+    NvBufSurfTransformParams tp{};
+    tp.transform_flag    = NVBUFSURF_TRANSFORM_FILTER
+                         | NVBUFSURF_TRANSFORM_CROP_SRC
+                         | NVBUFSURF_TRANSFORM_CROP_DST;
+    tp.transform_filter  = NvBufSurfTransformInter_Default;
+    tp.src_rect          = &src_rect;
+    tp.dst_rect          = &dst_rect;
+
+    NvBufSurfTransform_Error xerr = NvBufSurfTransform(src, dst, &tp);
+    if (xerr != NvBufSurfTransformError_Success) {
+        std::printf("[tm-vlm] NvBufSurfTransform failed err=%d (id=%" PRIu64
+                    ") src memType=%d colorFmt=%d %ux%u  rect=%d,%d %ux%u\n",
+                    static_cast<int>(xerr), target_id,
+                    static_cast<int>(src->memType),
+                    static_cast<int>(src->surfaceList[frame_idx].colorFormat),
+                    src->surfaceList[frame_idx].width,
+                    src->surfaceList[frame_idx].height,
+                    x0, y0, crop_w, crop_h);
+        NvBufSurfaceDestroy(dst);
+        return false;
+    }
+
+    if (NvBufSurfaceMap(dst, 0, 0, NVBUF_MAP_READ) != 0) {
+        std::printf("[tm-vlm] dst Map failed (id=%" PRIu64 ")\n", target_id);
+        NvBufSurfaceDestroy(dst);
+        return false;
+    }
+    NvBufSurfaceSyncForCpu(dst, 0, 0);
+
+    const uint8_t *rgba = reinterpret_cast<uint8_t*>(dst->surfaceList[0].mappedAddr.addr[0]);
+    const int dpitch = static_cast<int>(dst->surfaceList[0].planeParams.pitch[0]);
+    if (!rgba) {
+        std::printf("[tm-vlm] dst mapped null (id=%" PRIu64 ")\n", target_id);
+        NvBufSurfaceUnMap(dst, 0, 0);
+        NvBufSurfaceDestroy(dst);
+        return false;
+    }
+
+    // mkdir -p /run/swl/crops on first call.
+    static bool s_dir_made = false;
+    const char *dir = "/run/swl/crops";
+    if (!s_dir_made) { ::mkdir(dir, 0755); s_dir_made = true; }
+    char path[128];
+    std::snprintf(path, sizeof(path), "%s/%" PRIu64 ".ppm", dir, target_id);
+
+    std::FILE *f = std::fopen(path, "wb");
+    if (!f) {
+        std::printf("[tm-vlm] fopen(%s) failed: %s\n", path, std::strerror(errno));
+        NvBufSurfaceUnMap(dst, 0, 0);
+        NvBufSurfaceDestroy(dst);
+        return false;
+    }
+    std::fprintf(f, "P6\n%d %d\n255\n", kVLMCropSize, kVLMCropSize);
+
+    // RGBA → RGB row-by-row (drop alpha).
+    std::vector<uint8_t> rgb(kVLMCropSize * 3);
+    for (int y = 0; y < kVLMCropSize; ++y) {
+        const uint8_t *r = rgba + y * dpitch;
+        for (int x = 0; x < kVLMCropSize; ++x) {
+            rgb[x * 3 + 0] = r[x * 4 + 0];
+            rgb[x * 3 + 1] = r[x * 4 + 1];
+            rgb[x * 3 + 2] = r[x * 4 + 2];
+        }
+        std::fwrite(rgb.data(), 1, rgb.size(), f);
+    }
+    std::fclose(f);
+
+    NvBufSurfaceUnMap(dst, 0, 0);
+    NvBufSurfaceDestroy(dst);
+    std::printf("[tm-vlm] crop id=%" PRIu64 " src=%ux%u → %s\n",
+                target_id, crop_w, crop_h, path);
+    std::fflush(stdout);
+    return true;
+}
+
+void TargetManager::on_batch_with_buffer(GstBuffer *buf, NvDsBatchMeta *batch_meta) {
+    // Run all the normal on_batch processing first (suppression, geo, dirty,
+    // etc.). The buffer side-channel below extracts bbox crops from the
+    // NvBufSurface for the on-board VLM (vessel-class + size prior).
+    on_batch(batch_meta);
+
+    if (!buf || !batch_meta) return;
+
+    GstMapInfo info;
+    if (!gst_buffer_map(buf, &info, GST_MAP_READ)) return;
+    NvBufSurface *surface = reinterpret_cast<NvBufSurface*>(info.data);
+
+    // Walk the batch and extract one crop per never-before-seen target id.
+    if (surface) {
+        uint32_t frame_idx = 0;
+        for (NvDsMetaList *lf = batch_meta->frame_meta_list;
+             lf && frame_idx < surface->numFilled; lf = lf->next, ++frame_idx) {
+            NvDsFrameMeta *frame_meta = static_cast<NvDsFrameMeta*>(lf->data);
+            if (!frame_meta) continue;
+            for (NvDsMetaList *lo = frame_meta->obj_meta_list; lo; lo = lo->next) {
+                NvDsObjectMeta *obj = static_cast<NvDsObjectMeta*>(lo->data);
+                if (!obj) continue;
+                std::uint64_t packed_id =
+                    (((static_cast<std::uint64_t>(obj->class_id) + 1) & 0xFFull) << 8)
+                    | (static_cast<std::uint64_t>(obj->object_id) & 0xFFull);
+                {
+                    std::lock_guard<std::mutex> lk(vlm_mu_);
+                    if (vlm_cropped_ids_.count(packed_id)) continue;
+                    vlm_cropped_ids_.insert(packed_id);
+                }
+                const auto &bb = obj->tracker_bbox_info.org_bbox_coords;
+                tm_vlm_write_ppm_crop(surface, frame_idx,
+                                      static_cast<int>(bb.left),
+                                      static_cast<int>(bb.top),
+                                      static_cast<int>(bb.width),
+                                      static_cast<int>(bb.height),
+                                      packed_id);
+            }
+        }
+    }
+    gst_buffer_unmap(buf, &info);
+}
+
 void TargetManager::apply_colors(NvDsBatchMeta *batch_meta) {
     if (!batch_meta) return;
 
@@ -765,6 +1073,13 @@ int tm_init(const char *beam_url, const char *inbound_socket_path) {
 void tm_on_batch(NvDsBatchMeta *batch_meta) {
     try {
         if (g_tm) g_tm->on_batch(batch_meta);
+    } catch (...) {
+    }
+}
+
+void tm_on_batch_with_buffer(GstBuffer *buf, NvDsBatchMeta *batch_meta) {
+    try {
+        if (g_tm) g_tm->on_batch_with_buffer(buf, batch_meta);
     } catch (...) {
     }
 }

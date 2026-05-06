@@ -834,9 +834,13 @@ function renderMapOverlay(t) {
 
   const inner = document.getElementById('overlay-inner');
   if (!inner) return;
+  const decoded = targetLabels.get(t.id);
+  const headerTitle = decoded
+    ? `${decoded.label.toUpperCase()} #${decoded.objectId}`
+    : (t.label || String(t.id).slice(-4).toUpperCase());
   inner.innerHTML = `
     <div class="ol-header">
-      <span class="ol-title">${t.label || t.id}</span>
+      <span class="ol-title">${headerTitle}</span>
       <span class="ol-state-badge" style="color:${meta.color}">${meta.icon} ${meta.short}</span>
       <button class="ol-close" onclick="closeMapOverlay()">✕</button>
     </div>
@@ -1102,11 +1106,14 @@ function decodeProtoId(id) {
 function handleFrameDetection(data) {
   if (!data) return;
   console.log('frame_detection', data);
-  // Look up by ts_us (deepstream wall-clock µs) which shares the same epoch
-  // as the Date.now()*1000 timestamps stored by captureFrame.
-  const frame = findFrame(data.ts_us);
+  // Match by source `pts_ns` (streammux buf_pts in nanoseconds). The bridge's
+  // `_slim` only carries pts_ns; ts_us is dropped. captureFrame stores frames
+  // with the same source-PTS timebase via JSMpeg's onVideoDecode `time`
+  // argument, which (with ffmpeg `-copyts -fps_mode passthrough` in the
+  // relay) is derived from MPEG-TS PTS == source streammux PTS.
+  const frame = findFrame(data.pts_ns);
   if (!frame) {
-    console.error('handleFrameDetection: frame buffer is empty, cannot crop thumbnail (ts_us=' + data.ts_us + ')');
+    console.error('handleFrameDetection: frame buffer is empty, cannot crop thumbnail (pts_ns=' + data.pts_ns + ')');
     return;
   }
 
@@ -1148,6 +1155,14 @@ function handleFrameDetection(data) {
 
   // JSMpeg handles reconnection internally (reconnectInterval defaults to 5s).
   // Don't manage the WebSocket manually — just use the provided callbacks.
+  //
+  // The 2nd arg jsmpeg passes to onVideoDecode is *wall-clock decode duration*
+  // (`JSMpeg.Now() - startTime`), NOT a PTS — useless for sync. Source-PTS-
+  // derived time lives on the decoder itself: the TS demuxer parses MPEG-TS
+  // PTS into `decoder.currentTime` (seconds). With ffmpeg `-copyts
+  // -fps_mode passthrough` in client/server.js's relay, that PTS equals the
+  // source streammux `buf_pts` — the same quantity the patch emits as
+  // `pts_ns` over WSS — so frame-buffer lookup by pts_ns matches.
   new JSMpeg.Player(RTSP_WS_URL, {
     canvas,
     autoplay: true,
@@ -1156,7 +1171,11 @@ function handleFrameDetection(data) {
     reconnectInterval: 5,
     onSourceEstablished: () => setPipStatus('live'),
     onSourceCompleted:   () => setPipStatus('connecting'),
-    onVideoDecode: () => captureFrame(Date.now() * 1000),
+    onVideoDecode: (decoder) => {
+      const t = Number(decoder && decoder.currentTime);
+      if (!Number.isFinite(t)) return;
+      captureFrame(Math.round(t * 1e9));
+    },
   });
 
   toggleBtn.addEventListener('click', () => {

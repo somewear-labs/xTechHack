@@ -55,7 +55,13 @@ function startFfmpeg() {
     // a huge backlog when source is briefly slow; keep latency low).
     '-thread_queue_size', '64',
     '-i', RTSP_URL,
-    // === output: MPEG-1 over MPEG-TS to the WS relay (unchanged) ===
+    // Preserve source PTS through the relay so the client can sync WSS bbox
+    // events (carry source `buf_pts` as `pts_ns`) to the matching decoded
+    // video frame. Without these flags ffmpeg rebases output PTS to start
+    // at 0 and the client falls back to oldest-frame thumbnail crops.
+    '-fps_mode', 'passthrough',
+    '-copyts',
+    // === output: MPEG-1 over MPEG-TS to the WS relay ===
     '-f', 'mpegts',
     '-codec:v', 'mpeg1video',
     '-b:v', '1000k',

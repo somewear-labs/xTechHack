@@ -1,0 +1,3 @@
+root ::= "{" ws "\"class\":" ws "\"" cls "\"" ws "}"
+cls ::= "cargo" | "tanker" | "fishing" | "small_craft" | "passenger" | "tug" | "naval" | "yacht" | "other"
+ws ::= [ \t]*
