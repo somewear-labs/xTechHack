@@ -146,7 +146,7 @@ HTTP_PORT = 8080
 
 BEAM_API_URL      = "http://localhost:9091/api/package/async"
 BEAM_WORKSPACE_ID = "71556"
-BEAM_CHANNELS     = ["Radio"]   # mesh-only; no HBW. Workspace-broadcast (no targetUserId).
+BEAM_CHANNELS     = ["Radio"]   # mesh-only; HBW fan-out doubled DEVICE_ROUTER alloc-failure rate without delivering.
 
 # Outbound sim defaults (near Shack15, SF)
 _SIM_LAT      = 37.7993

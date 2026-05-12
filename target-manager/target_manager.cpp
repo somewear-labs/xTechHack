@@ -525,7 +525,7 @@ void TargetManager::post_batch(const std::vector<Target> &chunk) {
     std::string body =
         "{\"message\":{\"content\":\""
         + base64_encode(proto_bytes)
-        + "\"},\"channels\":[\"Radio\"],\"workspaceId\":\"71556\"}";  // mesh-only; workspace-broadcast (no targetUserId).
+        + "\"},\"channels\":[\"Radio\"],\"workspaceId\":\"71556\"}";  // mesh-only; workspace-broadcast (no targetUserId). Cellular fan-out doubled DEVICE_ROUTER alloc-failure rate without delivering, so reverted.
 
     // Detach a worker that owns its own curl handle. Beam's `message send`
     // CLI is synchronous on the radio link, so a single POST can hang for
