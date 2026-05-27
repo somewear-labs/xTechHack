@@ -980,7 +980,8 @@ html, body {
   color: var(--primary-on-surface);
 }
 
-#pip-canvas {
+#pip-canvas,
+#pip-canvas-2 {
   display: block;
   width: 100%;
   aspect-ratio: 16/9;
