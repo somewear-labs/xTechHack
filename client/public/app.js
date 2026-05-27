@@ -1141,8 +1141,8 @@ function handleFrameDetection(data) {
 
 (function initPip() {
   const CAM_WS_URLS = [
-    `ws://${location.hostname}:9999/0`,
-    `ws://${location.hostname}:9999/1`,
+    `ws://${location.hostname}:9999`,
+    `ws://${location.hostname}:9998`,
   ];
   const CAM_LABELS = ['CAM 1', 'CAM 2'];
 

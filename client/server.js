@@ -6,12 +6,11 @@ const WebSocket = require('ws');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const RTSP_WS_PORT = process.env.RTSP_WS_PORT || 9999;
 
-const RTSP_URLS = [
-  process.env.RTSP_URL   || 'rtsp://100.68.91.72:9554/ds-test',
-  process.env.RTSP_URL_2 || 'rtsp://100.68.91.72:9555/ds-test',
-];
+const RTSP_URL   = process.env.RTSP_URL   || 'rtsp://100.68.91.72:9554/ds-test';
+const RTSP_URL_2 = process.env.RTSP_URL_2 || 'rtsp://100.68.91.72:9555/ds-test';
+const RTSP_WS_PORT   = process.env.RTSP_WS_PORT   || 9999;
+const RTSP_WS_PORT_2 = process.env.RTSP_WS_PORT_2 || 9998;
 
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
@@ -31,13 +30,16 @@ app.listen(PORT, () => {
 });
 
 // ---------------------------------------------------------------------------
-// RTSP → MPEG1 WebSocket relay — single port, path-based routing
-// ws://host:9999/0  → RTSP_URL   (cam 1, :9554)
-// ws://host:9999/1  → RTSP_URL_2 (cam 2, :9555)
+// RTSP → MPEG1 WebSocket relay
 // ---------------------------------------------------------------------------
 
-function makeFfmpegArgs(rtspUrl) {
-  return [
+function makeRelay(label, rtspUrl, wsPort) {
+  const server = http.createServer();
+  const wss = new WebSocket.Server({ server });
+  let ffmpeg = null;
+  let clients = 0;
+
+  const ffmpegArgs = [
     '-rtsp_transport', 'tcp',
     '-stimeout', '5000000',
     '-reconnect', '1',
@@ -55,76 +57,54 @@ function makeFfmpegArgs(rtspUrl) {
     '-bf', '0',
     'pipe:1',
   ];
-}
 
-const rtspServer = http.createServer();
-const wss = new WebSocket.Server({ noServer: true });
+  function start() {
+    if (ffmpeg) return;
+    console.log(`[${label}] Starting ffmpeg → ${rtspUrl}`);
+    ffmpeg = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
 
-// Per-cam state
-const cams = RTSP_URLS.map((url, i) => ({
-  url,
-  idx: i,
-  ffmpeg: null,
-  clients: new Set(),
-}));
-
-function startFfmpeg(cam) {
-  if (cam.ffmpeg) return;
-  console.log(`[rtsp${cam.idx}] Starting ffmpeg for ${cam.url}`);
-  cam.ffmpeg = spawn('ffmpeg', makeFfmpegArgs(cam.url), { stdio: ['ignore', 'pipe', 'pipe'] });
-
-  cam.ffmpeg.on('error', (err) => {
-    console.error(`[rtsp${cam.idx}] ffmpeg error: ${err.message}`);
-    cam.ffmpeg = null;
-    if (cam.clients.size > 0) setTimeout(() => startFfmpeg(cam), 2000);
-  });
-  cam.ffmpeg.stderr.on('data', (d) => {
-    if (process.env.RTSP_DEBUG) process.stderr.write(d);
-  });
-  cam.ffmpeg.stdout.on('data', (data) => {
-    cam.clients.forEach((ws) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        try { ws.send(data); } catch (_) {}
+    ffmpeg.on('error', (err) => {
+      console.error(`[${label}] ffmpeg spawn error: ${err.message}`);
+      ffmpeg = null;
+      if (clients > 0) setTimeout(start, 2000);
+    });
+    ffmpeg.stderr.on('data', (d) => process.stderr.write(d));
+    ffmpeg.stdout.on('data', (data) => {
+      wss.clients.forEach((ws) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          try { ws.send(data); } catch (_) {}
+        }
+      });
+    });
+    ffmpeg.on('close', (code) => {
+      console.log(`[${label}] ffmpeg exited (${code})`);
+      ffmpeg = null;
+      if (clients > 0) {
+        console.log(`[${label}] Restarting in 2s...`);
+        setTimeout(start, 2000);
       }
     });
-  });
-  cam.ffmpeg.on('close', (code) => {
-    console.log(`[rtsp${cam.idx}] ffmpeg exited (${code})`);
-    cam.ffmpeg = null;
-    if (cam.clients.size > 0) {
-      console.log(`[rtsp${cam.idx}] Restarting ffmpeg in 2s...`);
-      setTimeout(() => startFfmpeg(cam), 2000);
-    }
-  });
-}
-
-function stopFfmpeg(cam) {
-  if (cam.ffmpeg) {
-    cam.ffmpeg.kill('SIGTERM');
-    cam.ffmpeg = null;
   }
-}
 
-rtspServer.on('upgrade', (request, socket, head) => {
-  const camIdx = parseInt(request.url.replace(/^\//, ''), 10);
-  const cam = cams[camIdx];
-  if (!cam) {
-    socket.destroy();
-    return;
+  function stop() {
+    if (ffmpeg) { ffmpeg.kill('SIGTERM'); ffmpeg = null; }
   }
-  wss.handleUpgrade(request, socket, head, (ws) => {
-    cam.clients.add(ws);
-    console.log(`[rtsp${camIdx}] Client connected (${cam.clients.size} total)`);
-    if (cam.clients.size === 1) startFfmpeg(cam);
 
+  wss.on('connection', (ws) => {
+    clients++;
+    console.log(`[${label}] WS client connected (${clients} total)`);
+    if (clients === 1) start();
     ws.on('close', () => {
-      cam.clients.delete(ws);
-      console.log(`[rtsp${camIdx}] Client disconnected (${cam.clients.size} remaining)`);
-      if (cam.clients.size === 0) stopFfmpeg(cam);
+      clients--;
+      console.log(`[${label}] WS client disconnected (${clients} remaining)`);
+      if (clients === 0) stop();
     });
   });
-});
 
-rtspServer.listen(RTSP_WS_PORT, () => {
-  console.log(`RTSP relay WebSocket listening on ws://localhost:${RTSP_WS_PORT}/{0,1}`);
-});
+  server.listen(wsPort, () => {
+    console.log(`[${label}] WebSocket relay on ws://localhost:${wsPort} → ${rtspUrl}`);
+  });
+}
+
+makeRelay('cam0', RTSP_URL,   RTSP_WS_PORT);
+makeRelay('cam1', RTSP_URL_2, RTSP_WS_PORT_2);
