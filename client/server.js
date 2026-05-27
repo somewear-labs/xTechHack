@@ -9,8 +9,8 @@ const PORT = process.env.PORT || 3000;
 const RTSP_WS_PORT = process.env.RTSP_WS_PORT || 9999;
 
 const RTSP_URLS = [
-  process.env.RTSP_URL   || 'rtsp://100.68.91.72:8554/ds-somecam-1',
-  process.env.RTSP_URL_2 || 'rtsp://100.68.91.72:8554/ds-somecam-2',
+  process.env.RTSP_URL   || 'rtsp://100.68.91.72:9554/ds-test',
+  process.env.RTSP_URL_2 || 'rtsp://100.68.91.72:9555/ds-test',
 ];
 
 app.use(express.static(path.join(__dirname, 'public')));
@@ -73,6 +73,11 @@ function startFfmpeg(cam) {
   console.log(`[rtsp${cam.idx}] Starting ffmpeg for ${cam.url}`);
   cam.ffmpeg = spawn('ffmpeg', makeFfmpegArgs(cam.url), { stdio: ['ignore', 'pipe', 'pipe'] });
 
+  cam.ffmpeg.on('error', (err) => {
+    console.error(`[rtsp${cam.idx}] ffmpeg error: ${err.message}`);
+    cam.ffmpeg = null;
+    if (cam.clients.size > 0) setTimeout(() => startFfmpeg(cam), 2000);
+  });
   cam.ffmpeg.stderr.on('data', (d) => {
     if (process.env.RTSP_DEBUG) process.stderr.write(d);
   });
