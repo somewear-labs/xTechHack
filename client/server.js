@@ -8,8 +8,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const RTSP_WS_PORT = process.env.RTSP_WS_PORT || 9999;
 
-const RTSP_URL   = process.env.RTSP_URL   || 'rtsp://100.68.81.224:9554/ds-test';
-const RTSP_URL_2 = process.env.RTSP_URL_2 || 'rtsp://100.68.81.224:9555/ds-test';
+const RTSP_URL   = process.env.RTSP_URL   || 'rtsp://100.68.91.72:9554/ds-test';
+const RTSP_URL_2 = process.env.RTSP_URL_2 || 'rtsp://100.68.91.72:9555/ds-test';
 const RTSP_WS_PORT_2 = process.env.RTSP_WS_PORT_2 || 9998;
 
 app.use(express.static(path.join(__dirname, 'public')));
