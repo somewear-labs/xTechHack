@@ -9,8 +9,8 @@ const PORT = process.env.PORT || 3000;
 const RTSP_WS_PORT = process.env.RTSP_WS_PORT || 9999;
 
 const RTSP_URLS = [
-  process.env.RTSP_URL   || 'rtsp://100.68.91.72:9554/ds-test',
-  process.env.RTSP_URL_2 || 'rtsp://100.68.91.72:9555/ds-test',
+  process.env.RTSP_URL   || 'rtsp://100.68.91.72:8554/ds-somecam-1',
+  process.env.RTSP_URL_2 || 'rtsp://100.68.91.72:8554/ds-somecam-2',
 ];
 
 app.use(express.static(path.join(__dirname, 'public')));
