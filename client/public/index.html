@@ -15,9 +15,14 @@
         <div id="pip-header">
           <span id="pip-title">RTMS FEED</span>
           <span id="pip-status" class="pip-status-connecting">CONNECTING</span>
+          <div id="cam-toggle">
+            <button class="cam-btn active" data-cam="0">CAM 1</button>
+            <button class="cam-btn" data-cam="1">CAM 2</button>
+          </div>
           <button id="pip-toggle">▼</button>
         </div>
         <canvas id="pip-canvas"></canvas>
+        <canvas id="pip-canvas-2" style="display:none"></canvas>
       </div>
 
       <div id="sidebar-header">

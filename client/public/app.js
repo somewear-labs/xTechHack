@@ -67,7 +67,10 @@ const protoMarkers = new Map(); // id → { marker: mapboxgl.Marker, el: HTMLEle
 const targetLabels = new Map(); // id → {classId, objectId, label}
 let rtmsCanvas = null;
 const FRAME_BUFFER_SIZE = 60;   // ~4 s at 15 fps
-const frameBuffer = [];         // [{pts_ns, snap}] FIFO, oldest first
+const frameBuffers = [[], []];  // per-cam [{pts_ns, snap}] FIFO, oldest first
+// Legacy alias — always points at the active cam's buffer for external callers
+let frameBuffer = frameBuffers[0];
+let activeCam = 0;
 let map;
 let ws;
 let reconnectTimeout;
@@ -1054,24 +1057,29 @@ document.getElementById('out-sim-btn').addEventListener('click', toggleOutSim);
 // RTMS frame buffer + bbox crop
 // ---------------------------------------------------------------------------
 
-function captureFrame(pts_ns) {
-  if (!rtmsCanvas || !rtmsCanvas.width || !rtmsCanvas.height) return;
+function captureFrame(pts_ns, camIdx) {
+  const cvs = camIdx === 1
+    ? document.getElementById('pip-canvas-2')
+    : document.getElementById('pip-canvas');
+  if (!cvs || !cvs.width || !cvs.height) return;
   const snap = document.createElement('canvas');
-  snap.width  = rtmsCanvas.width;
-  snap.height = rtmsCanvas.height;
-  snap.getContext('2d').drawImage(rtmsCanvas, 0, 0);
-  frameBuffer.push({ pts_ns, snap });
-  if (frameBuffer.length > FRAME_BUFFER_SIZE) frameBuffer.shift();
+  snap.width  = cvs.width;
+  snap.height = cvs.height;
+  snap.getContext('2d').drawImage(cvs, 0, 0);
+  const buf = frameBuffers[camIdx];
+  buf.push({ pts_ns, snap });
+  if (buf.length > FRAME_BUFFER_SIZE) buf.shift();
 }
 
 // Returns the buffered frame with the closest pts_ns, or null if buffer is empty.
-function findFrame(pts_ns) {
-  if (!frameBuffer.length) return null;
-  let best = frameBuffer[0];
-  let bestDiff = Math.abs(frameBuffer[0].pts_ns - pts_ns);
-  for (let i = 1; i < frameBuffer.length; i++) {
-    const diff = Math.abs(frameBuffer[i].pts_ns - pts_ns);
-    if (diff < bestDiff) { bestDiff = diff; best = frameBuffer[i]; }
+function findFrame(pts_ns, camIdx = activeCam) {
+  const buf = frameBuffers[camIdx] || frameBuffers[0];
+  if (!buf.length) return null;
+  let best = buf[0];
+  let bestDiff = Math.abs(buf[0].pts_ns - pts_ns);
+  for (let i = 1; i < buf.length; i++) {
+    const diff = Math.abs(buf[i].pts_ns - pts_ns);
+    if (diff < bestDiff) { bestDiff = diff; best = buf[i]; }
   }
   return best;
 }
@@ -1106,14 +1114,10 @@ function decodeProtoId(id) {
 function handleFrameDetection(data) {
   if (!data) return;
   console.log('frame_detection', data);
-  // Match by source `pts_ns` (streammux buf_pts in nanoseconds). The bridge's
-  // `_slim` only carries pts_ns; ts_us is dropped. captureFrame stores frames
-  // with the same source-PTS timebase via JSMpeg's onVideoDecode `time`
-  // argument, which (with ffmpeg `-copyts -fps_mode passthrough` in the
-  // relay) is derived from MPEG-TS PTS == source streammux PTS.
-  const frame = findFrame(data.pts_ns);
+  const camIdx = (data.src === 1) ? 1 : 0;
+  const frame = findFrame(data.pts_ns, camIdx);
   if (!frame) {
-    console.error('handleFrameDetection: frame buffer is empty, cannot crop thumbnail (pts_ns=' + data.pts_ns + ')');
+    console.error('handleFrameDetection: frame buffer empty for cam' + camIdx + ' (pts_ns=' + data.pts_ns + ')');
     return;
   }
 
@@ -1132,16 +1136,25 @@ function handleFrameDetection(data) {
 }
 
 // ---------------------------------------------------------------------------
-// RTMS PiP viewer
+// RTMS PiP viewer (dual-cam)
 // ---------------------------------------------------------------------------
 
 (function initPip() {
-  const RTSP_WS_URL = `ws://${location.hostname}:9999`;
+  const CAM_WS_URLS = [
+    `ws://${location.hostname}:9999`,
+    `ws://${location.hostname}:9998`,
+  ];
+  const CAM_LABELS = ['CAM 1', 'CAM 2'];
 
   const container = document.getElementById('pip-container');
-  const canvas    = document.getElementById('pip-canvas');
-  rtmsCanvas      = canvas;
+  const canvases  = [
+    document.getElementById('pip-canvas'),
+    document.getElementById('pip-canvas-2'),
+  ];
+  rtmsCanvas = canvases[0];
+
   const statusEl  = document.getElementById('pip-status');
+  const titleEl   = document.getElementById('pip-title');
   const toggleBtn = document.getElementById('pip-toggle');
 
   let collapsed = false;
@@ -1151,31 +1164,42 @@ function handleFrameDetection(data) {
     statusEl.textContent = { live: 'LIVE', connecting: 'CONNECTING', error: 'ERROR' }[state];
   }
 
+  function switchCam(idx) {
+    activeCam = idx;
+    frameBuffer = frameBuffers[idx];
+    rtmsCanvas  = canvases[idx];
+    canvases.forEach((c, i) => { c.style.display = i === idx ? '' : 'none'; });
+    titleEl.textContent = CAM_LABELS[idx];
+    document.querySelectorAll('.cam-btn').forEach(b => {
+      b.classList.toggle('active', Number(b.dataset.cam) === idx);
+    });
+    // Status reflects the active cam; force connecting briefly to give JSMpeg time to report
+    setPipStatus('connecting');
+  }
+
   setPipStatus('connecting');
 
-  // JSMpeg handles reconnection internally (reconnectInterval defaults to 5s).
-  // Don't manage the WebSocket manually — just use the provided callbacks.
-  //
-  // The 2nd arg jsmpeg passes to onVideoDecode is *wall-clock decode duration*
-  // (`JSMpeg.Now() - startTime`), NOT a PTS — useless for sync. Source-PTS-
-  // derived time lives on the decoder itself: the TS demuxer parses MPEG-TS
-  // PTS into `decoder.currentTime` (seconds). With ffmpeg `-copyts
-  // -fps_mode passthrough` in client/server.js's relay, that PTS equals the
-  // source streammux `buf_pts` — the same quantity the patch emits as
-  // `pts_ns` over WSS — so frame-buffer lookup by pts_ns matches.
-  new JSMpeg.Player(RTSP_WS_URL, {
-    canvas,
-    autoplay: true,
-    audio: false,
-    disableGl: true,
-    reconnectInterval: 5,
-    onSourceEstablished: () => setPipStatus('live'),
-    onSourceCompleted:   () => setPipStatus('connecting'),
-    onVideoDecode: (decoder) => {
-      const t = Number(decoder && decoder.currentTime);
-      if (!Number.isFinite(t)) return;
-      captureFrame(Math.round(t * 1e9));
-    },
+  // Both players run continuously — only the active canvas is visible.
+  // decoder.currentTime = source PTS (seconds) when ffmpeg -copyts -fps_mode passthrough is used.
+  canvases.forEach((canvas, i) => {
+    new JSMpeg.Player(CAM_WS_URLS[i], {
+      canvas,
+      autoplay: true,
+      audio: false,
+      disableGl: true,
+      reconnectInterval: 5,
+      onSourceEstablished: () => { if (i === activeCam) setPipStatus('live'); },
+      onSourceCompleted:   () => { if (i === activeCam) setPipStatus('connecting'); },
+      onVideoDecode: (decoder) => {
+        const t = Number(decoder && decoder.currentTime);
+        if (!Number.isFinite(t)) return;
+        captureFrame(Math.round(t * 1e9), i);
+      },
+    });
+  });
+
+  document.querySelectorAll('.cam-btn').forEach(btn => {
+    btn.addEventListener('click', () => switchCam(Number(btn.dataset.cam)));
   });
 
   toggleBtn.addEventListener('click', () => {
