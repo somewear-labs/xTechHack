@@ -41,10 +41,7 @@ function makeRelay(label, rtspUrl, wsPort) {
 
   const ffmpegArgs = [
     '-rtsp_transport', 'tcp',
-    '-stimeout', '5000000',
-    '-reconnect', '1',
-    '-reconnect_streamed', '1',
-    '-reconnect_delay_max', '2',
+    '-timeout', '5000000',
     '-thread_queue_size', '64',
     '-i', rtspUrl,
     '-fps_mode', 'passthrough',
