@@ -89,11 +89,22 @@ async def _bind_uds() -> socket.socket:
 
 
 class _LatestSlot:
-    """Single-cell, latest-wins buffer. Each new datagram overwrites."""
-    __slots__ = ("data", "received")
+    """Latest-wins buffer keyed by `src` (camera index). Each new datagram
+    from a given source overwrites the previous one; on tick, one message per
+    source is emitted so both cameras reach the client every cadence interval.
+    """
     def __init__(self) -> None:
-        self.data: bytes | None = None
+        self.by_src: dict[int, bytes] = {}
         self.received = 0
+
+    def put(self, raw: bytes, src: int) -> None:
+        self.by_src[src] = raw
+        self.received += 1
+
+    def drain(self) -> list[bytes]:
+        items = list(self.by_src.values())
+        self.by_src.clear()
+        return items
 
 
 class _UdsProto(asyncio.DatagramProtocol):
@@ -101,16 +112,16 @@ class _UdsProto(asyncio.DatagramProtocol):
         self.slot = slot
 
     def datagram_received(self, data, addr):
-        self.slot.data = data
-        self.slot.received += 1
+        try:
+            src = json.loads(data).get("src", 0)
+        except Exception:
+            src = 0
+        self.slot.put(data, src)
 
 
 def _slim(data: dict) -> dict:
     """Trim a deepstream datagram to the minimum the browser overlay needs:
-    `pts_ns` (the sync key for `requestVideoFrameCallback`) and per-target
-    `id` + `bbox`. Everything else — frame number, ts_us, src, class_id,
-    label, conf, foot_px — is dropped. class_id is still recoverable from
-    id's high bits if a consumer needs it.
+    `pts_ns`, `src` (camera index), and per-target `id` + `bbox`.
     """
     out_targets = []
     for t in data.get("targets", []) or []:
@@ -124,25 +135,30 @@ def _slim(data: dict) -> dict:
     out = {"targets": out_targets}
     if "pts_ns" in data:
         out["pts_ns"] = data["pts_ns"]
+    if "src" in data:
+        out["src"] = data["src"]
     return out
 
 
 async def _ticker(slot: _LatestSlot, peers: dict[str, "_PeerState"]) -> None:
     while True:
         await asyncio.sleep(PUBLISH_PERIOD)
-        raw = slot.data
-        slot.data = None
-        if raw is None:
+        raws = slot.drain()
+        if not raws:
             continue
-        try:
-            data = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            log.debug("bad UDS payload (%d bytes): %s", len(raw), exc)
+        msgs = []
+        for raw in raws:
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                log.debug("bad UDS payload (%d bytes): %s", len(raw), exc)
+                continue
+            msgs.append(json.dumps({
+                "action":  "publish",
+                "payload": {"event": EVENT_NAME, "data": _slim(data)},
+            }))
+        if not msgs:
             continue
-        msg = json.dumps({
-            "action":  "publish",
-            "payload": {"event": EVENT_NAME, "data": _slim(data)},
-        })
         # Reap pumps whose task ended (try-once died, or static pump cancelled)
         # so the ticker stops publishing into orphaned queues.
         for url, state in list(peers.items()):
@@ -150,12 +166,13 @@ async def _ticker(slot: _LatestSlot, peers: dict[str, "_PeerState"]) -> None:
                 peers.pop(url, None)
                 continue
             q = state.queue
-            if q.full():
-                try:
-                    q.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-            q.put_nowait(msg)
+            for msg in msgs:
+                if q.full():
+                    try:
+                        q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                q.put_nowait(msg)
 
 
 class _PeerState:
