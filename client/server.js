@@ -44,8 +44,6 @@ function makeRelay(label, rtspUrl, wsPort) {
     '-timeout', '5000000',
     '-thread_queue_size', '64',
     '-i', rtspUrl,
-    '-fps_mode', 'passthrough',
-    '-copyts',
     '-f', 'mpegts',
     '-codec:v', 'mpeg1video',
     '-b:v', '1000k',
