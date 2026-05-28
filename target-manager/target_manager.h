@@ -1,6 +1,7 @@
 #ifndef TARGET_MANAGER_H
 #define TARGET_MANAGER_H
 
+#include <stdint.h>
 #include <nvdsmeta.h>
 #include <gst/gst.h>          /* GstBuffer */
 #ifdef __cplusplus
@@ -24,6 +25,13 @@ void tm_on_batch_with_buffer(GstBuffer *buf, NvDsBatchMeta *batch_meta);
 void tm_apply_colors(NvDsBatchMeta *batch_meta);
 
 void tm_shutdown(void);
+
+/* Return the canonical unified target ID for a given (source pad, tracker object).
+ * Used by the deepstream_app patch to stamp consistent IDs into the per-frame JSON
+ * so the browser overlay shows the same ID for the same person across both cameras.
+ * Returns 0 if the track hasn't been processed by on_batch yet (use local packed_id
+ * as fallback in that case). */
+uint64_t tm_get_canonical_id(uint32_t src_id, int class_id, uint64_t obj_id);
 
 #ifdef __cplusplus
 }

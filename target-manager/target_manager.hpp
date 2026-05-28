@@ -48,6 +48,10 @@ struct Target {
     // we go INACTIVE so the same person can't sneak back under a new track id.
     std::vector<float> reid_feature;
 
+    // Which source pad last updated this target. Used by cross-camera ReID to
+    // skip entries from the same camera when searching for a match.
+    int last_seen_src = -1;
+
     // Persistent TargetState (mirrors the proto enum values; using plain int
     // here so the header doesn't have to pull in protobuf):
     //   0 = UNKNOWN   (default — bbox painted blue)
@@ -100,6 +104,11 @@ public:
     void on_batch_with_buffer(GstBuffer *buf, NvDsBatchMeta *batch_meta);
     void apply_colors(NvDsBatchMeta *batch_meta);
 
+    // Return the canonical targets_ key for a given (source, local tracker object).
+    // Used by the deepstream_app patch to stamp canonical IDs into the per-frame JSON.
+    // Returns 0 if the track isn't in the gallery yet.
+    std::uint64_t get_canonical_id(std::uint32_t src_id, int class_id, std::uint64_t obj_id) const;
+
 private:
     std::string beam_url_;
     std::string inbound_socket_path_;
@@ -127,6 +136,13 @@ private:
     int                                       vlm_loader_period_sec_ = 5;
     bool                                      vlm_size_prior_enabled_ = true;
     void vlm_loader_loop();
+
+    // Cross-camera ReID: maps src_packed=(source_id<<16|packed_id) → canonical targets_ key.
+    // targets_ is the single source of truth.  When a new local track appears we search
+    // targets_ directly for an embedding match from a different source — same object on
+    // both cameras → one shared entry, one shared state.
+    std::unordered_map<std::uint64_t, std::uint64_t> xc_id_map_;  // src_packed → canonical_id
+    mutable std::mutex xc_mu_;
 
     // Time-bounded suppression: ids that arrived over the inbound socket with
     // state=INACTIVE, mapped to their expiry (unix seconds). Once expired, the

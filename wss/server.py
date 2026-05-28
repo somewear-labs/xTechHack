@@ -144,7 +144,7 @@ HOST = "0.0.0.0"
 PORT = 8000
 HTTP_PORT = 8080
 
-BEAM_API_URL      = "http://localhost:9091/api/package/async"
+BEAM_API_URL      = "http://localhost:9091/api/package"
 BEAM_WORKSPACE_ID = "71556"
 BEAM_CHANNELS     = ["Radio"]   # mesh-only; HBW fan-out doubled DEVICE_ROUTER alloc-failure rate without delivering.
 

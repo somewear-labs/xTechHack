@@ -108,7 +108,7 @@ TargetManager::TargetManager(std::string beam_url, std::string inbound_socket_pa
     , inbound_socket_path_(std::move(inbound_socket_path))
 {
     cadence_sec_         = getenv_int("TM_DELTA_CADENCE_SEC", 5);
-    beam_api_url_        = getenv_or("TM_BEAM_URL",       "http://localhost:9091/api/package/async");
+    beam_api_url_        = getenv_or("TM_BEAM_URL",       "http://localhost:9091/api/package");
     beam_workspace_      = getenv_or("TM_WORKSPACE_ID",   "71556");
     reid_sim_threshold_  = getenv_float("TM_REID_THRESHOLD", 0.7f);
     reid_max_banned_     = static_cast<std::size_t>(getenv_int("TM_REID_MAX_BANNED", 256));
@@ -605,21 +605,34 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
         }
 
         // Cache next before the body since we may remove the current node.
+        const std::uint32_t src_id = static_cast<std::uint32_t>(frame_meta->pad_index);
         for (NvDsMetaList *lo = frame_meta->obj_meta_list, *lo_next = nullptr; lo; lo = lo_next) {
             lo_next = lo->next;
             auto *obj      = static_cast<NvDsObjectMeta *>(lo->data);
             const auto &bb = obj->tracker_bbox_info.org_bbox_coords;
 
-            // Mirrors the Target ctor packing in target_manager.hpp:
-            // upper byte = class_id+1, lower byte = object_id mod 256.
+            // Local packed id: upper byte = class_id+1, lower byte = object_id mod 256.
+            // This is source-local and may collide across cameras.
             const std::uint64_t packed_id =
                 (((static_cast<std::uint64_t>(obj->class_id) + 1) & 0xFFull) << 8) |
                   (static_cast<std::uint64_t>(obj->object_id)     & 0xFFull);
+            // Source-qualified key used as the gallery index.
+            const std::uint64_t src_packed =
+                (static_cast<std::uint64_t>(src_id) << 16) | packed_id;
+
+            // Check suppression by canonical_id (if already resolved) or packed_id
+            // for tracks we haven't seen before.
+            std::uint64_t canonical_id = packed_id;
+            {
+                std::lock_guard<std::mutex> lk(xc_mu_);
+                auto map_it = xc_id_map_.find(src_packed);
+                if (map_it != xc_id_map_.end()) canonical_id = map_it->second;
+            }
             {
                 std::lock_guard<std::mutex> lk(inactive_mu_);
-                if (inactive_ids_.count(packed_id)) {
-                    std::printf("  obj id=%" PRIu64 " class=%d SUPPRESSED (inactive) -> remove from frame\n",
-                                obj->object_id, obj->class_id);
+                if (inactive_ids_.count(canonical_id)) {
+                    std::printf("  obj id=%" PRIu64 " src=%u class=%d SUPPRESSED (inactive) -> remove from frame\n",
+                                obj->object_id, src_id, obj->class_id);
                     nvds_remove_obj_meta_from_frame(frame_meta, obj);
                     continue;
                 }
@@ -676,15 +689,48 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
                         if (s >= reid_sim_threshold_) { reid_match = true; break; }
                     }
                     if (reid_match) {
-                        inactive_ids_[packed_id] = now_unix_seconds() + inactive_ttl_sec_;
+                        inactive_ids_[canonical_id] = now_unix_seconds() + inactive_ttl_sec_;
                     }
                 }
                 if (reid_match) {
-                    std::printf("  obj id=%" PRIu64 " ReID match (sim=%.3f >= %.3f) -> SUPPRESS\n",
-                                obj->object_id, best_sim, reid_sim_threshold_);
+                    std::printf("  obj id=%" PRIu64 " src=%u ReID banned (sim=%.3f >= %.3f) -> SUPPRESS\n",
+                                obj->object_id, src_id, best_sim, reid_sim_threshold_);
                     nvds_remove_obj_meta_from_frame(frame_meta, obj);
                     continue;
                 }
+            }
+
+            // Cross-camera ReID: resolve canonical_id for this (src, local_track) pair.
+            // targets_ is the single source of truth — search it directly for a match
+            // from any other source.  Same object on both cameras → one shared entry.
+            {
+                std::lock_guard<std::mutex> lk(xc_mu_);
+                auto map_it = xc_id_map_.find(src_packed);
+                if (map_it != xc_id_map_.end()) canonical_id = map_it->second;
+            }
+            if (canonical_id == packed_id && !reid_norm.empty()) {
+                float best = -1.0f;
+                std::uint64_t best_id = 0;
+                {
+                    std::lock_guard<std::mutex> lk(targets_mu_);
+                    for (const auto &kv : targets_) {
+                        if (!kv.second) continue;
+                        if (kv.second->last_seen_src == static_cast<int>(src_id)) continue;
+                        if (kv.second->reid_feature.empty()) continue;
+                        float s = dot(kv.second->reid_feature, reid_norm);
+                        if (s > best && s >= reid_sim_threshold_) {
+                            best = s;
+                            best_id = kv.first;
+                        }
+                    }
+                }
+                if (best_id != 0) {
+                    canonical_id = best_id;
+                    std::printf("[tm-xcam] src=%u packed=%" PRIu64 " -> canonical=%" PRIu64 " (sim=%.3f)\n",
+                                src_id, packed_id, canonical_id, best);
+                }
+                std::lock_guard<std::mutex> lk(xc_mu_);
+                xc_id_map_[src_packed] = canonical_id;
             }
 
             // Prefer the VLM-driven size prior when available — at our
@@ -721,7 +767,8 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
             {
                 std::lock_guard<std::mutex> lk(targets_mu_);
                 auto _tgt = std::make_shared<Target>(obj->class_id, obj->object_id);
-                auto [it, ins] = targets_.try_emplace(_tgt->id, _tgt);
+                _tgt->id = canonical_id;  // override local packed_id with unified canonical
+                auto [it, ins] = targets_.try_emplace(canonical_id, _tgt);
                 inserted = ins;
                 if (gp) {
                     geo_now_set = true;
@@ -739,7 +786,8 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
                 it->second->bbox_top    = bb.top;
                 it->second->bbox_width  = bb.width;
                 it->second->bbox_height = bb.height;
-                it->second->last_seen   = now_unix_seconds();
+                it->second->last_seen     = now_unix_seconds();
+                it->second->last_seen_src = static_cast<int>(src_id);
                 // Only flag dirty when the target actually moved (or this
                 // is its first detection). State transitions from the inbound
                 // path set dirty independently, so they still surface.
@@ -769,7 +817,7 @@ void TargetManager::on_batch(NvDsBatchMeta *batch_meta) {
             int t_state = 0;
             {
                 std::lock_guard<std::mutex> lk(targets_mu_);
-                auto it = targets_.find(packed_id);
+                auto it = targets_.find(canonical_id);
                 if (it != targets_.end() && it->second) t_state = it->second->state;
             }
             {
@@ -999,19 +1047,28 @@ void TargetManager::apply_colors(NvDsBatchMeta *batch_meta) {
 
     for (NvDsMetaList *lf = batch_meta->frame_meta_list; lf; lf = lf->next) {
         auto *frame_meta = static_cast<NvDsFrameMeta *>(lf->data);
+        const std::uint32_t src_id = static_cast<std::uint32_t>(frame_meta->pad_index);
         for (NvDsMetaList *lo = frame_meta->obj_meta_list; lo; lo = lo->next) {
             auto *obj = static_cast<NvDsObjectMeta *>(lo->data);
-            // MUST match the +1 packing used in on_batch / Target ctor.
-            // Earlier this was missing the +1 → lookup miss → never painted.
             const std::uint64_t packed_id =
                 (((static_cast<std::uint64_t>(obj->class_id) + 1) & 0xFFull) << 8) |
                   (static_cast<std::uint64_t>(obj->object_id)     & 0xFFull);
+            const std::uint64_t src_packed =
+                (static_cast<std::uint64_t>(src_id) << 16) | packed_id;
+
+            // Resolve through the cross-camera gallery to get the canonical targets_ key.
+            std::uint64_t canonical_id = packed_id;
+            {
+                std::lock_guard<std::mutex> lk(xc_mu_);
+                auto it2 = xc_id_map_.find(src_packed);
+                if (it2 != xc_id_map_.end()) canonical_id = it2->second;
+            }
 
             int  state         = 0;   // UNKNOWN default
             bool state_changed = false;
             {
                 std::lock_guard<std::mutex> lk(targets_mu_);
-                auto it = targets_.find(packed_id);
+                auto it = targets_.find(canonical_id);
                 if (it != targets_.end() && it->second) {
                     state = it->second->state;
                     if (state != it->second->last_painted_state) {
@@ -1044,8 +1101,8 @@ void TargetManager::apply_colors(NvDsBatchMeta *batch_meta) {
             rp.has_color_info     = 1;   // tell nvosd to use our color
 
             if (state_changed) {
-                std::printf("[tm-color] id=%" PRIu64 " -> %s (rgba=%.1f,%.1f,%.1f,%.1f w=%u)\n",
-                            packed_id, state_name(state), r, g, b, a, width);
+                std::printf("[tm-color] canonical=%" PRIu64 " src=%u -> %s (rgba=%.1f,%.1f,%.1f,%.1f w=%u)\n",
+                            canonical_id, src_id, state_name(state), r, g, b, a, width);
                 std::fflush(stdout);
             }
         }
@@ -1097,4 +1154,20 @@ void tm_shutdown(void) {
         curl_global_cleanup();
     } catch (...) {
     }
+}
+
+std::uint64_t TargetManager::get_canonical_id(std::uint32_t src_id, int class_id, std::uint64_t obj_id) const {
+    const std::uint64_t packed_id =
+        (((static_cast<std::uint64_t>(class_id) + 1) & 0xFFull) << 8) |
+          (static_cast<std::uint64_t>(obj_id)        & 0xFFull);
+    const std::uint64_t src_packed =
+        (static_cast<std::uint64_t>(src_id) << 16) | packed_id;
+    std::lock_guard<std::mutex> lk(xc_mu_);
+    auto it = xc_id_map_.find(src_packed);
+    return (it != xc_id_map_.end()) ? it->second : 0;
+}
+
+uint64_t tm_get_canonical_id(uint32_t src_id, int class_id, uint64_t obj_id) {
+    if (!g_tm) return 0;
+    return g_tm->get_canonical_id(src_id, class_id, obj_id);
 }
